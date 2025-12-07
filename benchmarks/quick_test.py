@@ -21,10 +21,17 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any
 
+# Add parent directory to Python path (so we can import visual_rag)
+# This allows running the script directly without pip install
+_script_dir = Path(__file__).parent
+_parent_dir = _script_dir.parent
+if str(_parent_dir) not in sys.path:
+    sys.path.insert(0, str(_parent_dir))
+
 import numpy as np
 from tqdm import tqdm
 
-# Visual RAG imports
+# Visual RAG imports (now works without pip install)
 from visual_rag.embedding import VisualEmbedder
 from visual_rag.embedding.pooling import (
     tile_level_mean_pooling,
@@ -161,7 +168,7 @@ def search_exhaustive(query_emb: np.ndarray, docs: Dict, top_k: int = 10) -> Lis
 def search_two_stage(
     query_emb: np.ndarray,
     docs: Dict,
-    prefetch_k: int = 50,
+    prefetch_k: int = 20,
     top_k: int = 10,
 ) -> List[Dict]:
     """
@@ -296,9 +303,12 @@ def run_benchmark(
     samples = data["samples"]
     num_docs = len(docs)
     
-    # Auto-set prefetch_k to be meaningful (30% of docs, min 10, max 100)
+    # Auto-set prefetch_k to be meaningful (default: 20, or 20% of docs if >100 docs)
     if prefetch_k is None:
-        prefetch_k = max(10, min(100, int(num_docs * 0.3)))
+        if num_docs <= 100:
+            prefetch_k = 20  # Default: prefetch 20, rerank to top-10
+        else:
+            prefetch_k = max(20, min(100, int(num_docs * 0.2)))  # 20% for larger collections
     
     # Ensure prefetch_k < num_docs for meaningful two-stage comparison
     if prefetch_k >= num_docs:
@@ -508,8 +518,8 @@ def main():
         help="Model: vidore/colSmol-500M (default), vidore/colpali-v1.3"
     )
     parser.add_argument(
-        "--prefetch-k", type=int, default=50,
-        help="Stage 1 candidates for two-stage (default: 50)"
+        "--prefetch-k", type=int, default=None,
+        help="Stage 1 candidates for two-stage (default: 20 for <=100 docs, auto for larger)"
     )
     parser.add_argument(
         "--skip-exhaustive", action="store_true",
