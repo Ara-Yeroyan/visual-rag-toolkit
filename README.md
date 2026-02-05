@@ -1,9 +1,13 @@
 # Visual RAG Toolkit
 
-[![PyPI version](https://badge.fury.io/py/visual-rag-toolkit.svg)](https://badge.fury.io/py/visual-rag-toolkit)
-[![CI](https://github.com/Ara-Yeroyan/visual-rag-toolkit/actions/workflows/ci.yaml/badge.svg)](https://github.com/Ara-Yeroyan/visual-rag-toolkit/actions/workflows/ci.yaml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![PyPI](https://img.shields.io/pypi/v/visual-rag-toolkit)](https://pypi.org/project/visual-rag-toolkit/)
+[![Python](https://img.shields.io/pypi/pyversions/visual-rag-toolkit)](https://pypi.org/project/visual-rag-toolkit/)
+[![License](https://img.shields.io/pypi/l/visual-rag-toolkit)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/Ara-Yeroyan/visual-rag-toolkit/ci.yaml?branch=main)](https://github.com/Ara-Yeroyan/visual-rag-toolkit/actions/workflows/ci.yaml)
+
+Note:
+- The **PyPI badge** shows “not found” until the first release is published.
+- The **CI badge** requires the GitHub repo to be **public** (GitHub does not serve Actions badges for private repos).
 
 End-to-end visual document retrieval toolkit featuring **fast multi-stage retrieval** (prefetch with pooled vectors + exact MaxSim reranking).
 
@@ -27,11 +31,10 @@ This repo contains:
 pip install visual-rag-toolkit
 
 # With specific features
-pip install visual-rag-toolkit[embedding]    # ColSmol/ColPali embedding support
-pip install visual-rag-toolkit[pdf]          # PDF processing
-pip install visual-rag-toolkit[qdrant]       # Vector database
-pip install visual-rag-toolkit[cloudinary]   # Image CDN
 pip install visual-rag-toolkit[ui]           # Streamlit demo dependencies
+pip install visual-rag-toolkit[qdrant]       # Vector database
+pip install visual-rag-toolkit[embedding]    # ColSmol/ColPali embedding support
+pip install visual-rag-toolkit[cloudinary]   # Image CDN
 
 # All dependencies
 pip install visual-rag-toolkit[all]
@@ -70,6 +73,80 @@ results = retriever.search_server_side(
 
 for r in results[:3]:
     print(r["id"], r["score_final"])
+```
+
+### End-to-end: ingest PDFs (with cropping) → index in Qdrant
+
+This is the “SDK-style” pipeline: PDF → images → optional crop → embed → store vectors + payload in Qdrant.
+
+```python
+import os
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from visual_rag import VisualEmbedder
+from visual_rag.indexing import ProcessingPipeline, QdrantIndexer
+
+QDRANT_URL = os.environ["SIGIR_QDRANT_URL"]  # or QDRANT_URL
+QDRANT_KEY = os.getenv("SIGIR_QDRANT_KEY", "")  # or QDRANT_API_KEY
+
+collection = "my_visual_docs"
+
+embedder = VisualEmbedder(
+    model_name="vidore/colSmol-500M",
+    torch_dtype=torch.float16,
+    output_dtype=np.float16,
+    batch_size=8,
+)
+
+indexer = QdrantIndexer(
+    url=QDRANT_URL,
+    api_key=QDRANT_KEY,
+    collection_name=collection,
+    prefer_grpc=True,
+    vector_datatype="float16",
+)
+indexer.create_collection(force_recreate=False)
+
+pipeline = ProcessingPipeline(
+    embedder=embedder,
+    indexer=indexer,
+    embedding_strategy="all",  # store full tokens + pooled vectors in one pass
+    crop_empty=True,
+    crop_empty_percentage_to_remove=0.99,  # kept for traceability
+    crop_empty_remove_page_number=True,
+    crop_empty_preserve_border_px=1,
+    crop_empty_uniform_rowcol_std_threshold=3.0,
+)
+
+pdfs = [Path("docs/a.pdf"), Path("docs/b.pdf")]
+for pdf_path in pdfs:
+    pipeline.process_pdf(
+        pdf_path,
+        skip_existing=True,
+        upload_to_cloudinary=False,
+        upload_to_qdrant=True,
+    )
+```
+
+CLI equivalent:
+
+```bash
+export SIGIR_QDRANT_URL="https://YOUR_QDRANT"
+export SIGIR_QDRANT_KEY="YOUR_KEY"
+
+visual-rag process \
+  --reports-dir ./docs \
+  --collection my_visual_docs \
+  --model vidore/colSmol-500M \
+  --strategy all \
+  --batch-size 8 \
+  --qdrant-vector-dtype float16 \
+  --prefer-grpc \
+  --crop-empty \
+  --crop-empty-remove-page-number
 ```
 
 ### Process a PDF into images (no embedding, no vector DB)
@@ -124,15 +201,10 @@ visual-rag-toolkit/
 Configure via environment variables or YAML:
 
 ```bash
-# Qdrant credentials (preferred names used by the demo + scripts)
-export SIGIR_QDRANT_URL="https://your-cluster.qdrant.io"
-export SIGIR_QDRANT_KEY="your-api-key"
 
-# Backwards-compatible fallbacks (also supported)
+# Qdrant credentials (preferred names used by the demo + scripts)
 export QDRANT_URL="https://your-cluster.qdrant.io"
 export QDRANT_API_KEY="your-api-key"
-
-export VISUALRAG_MODEL="vidore/colSmol-500M"
 
 # Special token handling (default: filter them out)
 export VISUALRAG_INCLUDE_SPECIAL_TOKENS=true  # Include special tokens
@@ -184,7 +256,7 @@ python -m benchmarks.vidore_beir_qdrant.run_qdrant_beir \
 ```
 
 More commands (including multi-stage variants and cropping configs) live in:
-- `benchmarks/vidore_tatdqa_test/COMMANDS.md`
+- `examples/COMMANDS.md`
 
 ## 🔧 Development
 

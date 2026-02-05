@@ -1,10 +1,12 @@
 """Indexing runner with UI updates."""
 
 import hashlib
+import importlib.util
 import json
 import time
 import traceback
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -19,8 +21,35 @@ TORCH_DTYPE_MAP = {
     "float32": torch.float32,
     "bfloat16": torch.bfloat16,
 }
-from visual_rag.indexing import QdrantIndexer
-from benchmarks.vidore_tatdqa_test.dataset_loader import load_vidore_beir_dataset
+
+# --- Robust imports (Spaces-friendly) ---
+# Some environments can have a third-party `benchmarks` package installed, or
+# resolve `visual_rag.indexing` oddly. These fallbacks keep the demo working.
+try:
+    from visual_rag.indexing import QdrantIndexer
+except Exception:  # pragma: no cover
+    from visual_rag.indexing.qdrant_indexer import QdrantIndexer
+
+
+def _load_local_benchmark_module(module_filename: str):
+    root = Path(__file__).resolve().parents[1]  # demo/.. = repo root
+    target = root / "benchmarks" / "vidore_tatdqa_test" / module_filename
+    if not target.exists():
+        raise ModuleNotFoundError(f"Missing local benchmark module file: {target}")
+    name = f"_visual_rag_toolkit_local_{target.stem}"
+    spec = importlib.util.spec_from_file_location(name, str(target))
+    if spec is None or spec.loader is None:
+        raise ModuleNotFoundError(f"Could not load module spec for: {target}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    return mod
+
+
+try:
+    from benchmarks.vidore_tatdqa_test.dataset_loader import load_vidore_beir_dataset
+except ModuleNotFoundError:  # pragma: no cover
+    _dl = _load_local_benchmark_module("dataset_loader.py")
+    load_vidore_beir_dataset = _dl.load_vidore_beir_dataset
 
 from demo.qdrant_utils import get_qdrant_credentials
 
