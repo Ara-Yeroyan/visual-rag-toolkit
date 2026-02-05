@@ -9,6 +9,8 @@ End-to-end visual document retrieval toolkit featuring **fast multi-stage retrie
 
 **[Try the Live Demo](https://huggingface.co/spaces/Yeroyan/visual-rag-toolkit)** - Upload PDFs, index to Qdrant, and query with visual retrieval.
 
+**[Watch the Tutorial](https://drive.google.com/file/d/1SmpVJicsvyZ-awlwYtSkLw6BCSO7IJTw/view)** - Video walkthrough of the toolkit in action.
+
 This repo contains:
 - a **Python package** (`visual_rag`)
 - a **Streamlit demo app** (`demo/`)

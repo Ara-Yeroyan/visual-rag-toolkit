@@ -26,5 +26,13 @@ def render_header():
         ">
             SIGIR 2026 Demo - Multi-Vector Visual Document Retrieval
         </p>
+        <p style="
+            font-size: 2rem;
+            margin-top: 8px;
+        ">
+            <a href="https://drive.google.com/file/d/1SmpVJicsvyZ-awlwYtSkLw6BCSO7IJTw/view" target="_blank" style="color: #0066cc; text-decoration: none;">
+                🎬 Watch Tutorial
+            </a>
+        </p>
     </div>
     """, unsafe_allow_html=True)
