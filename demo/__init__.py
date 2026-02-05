@@ -7,4 +7,4 @@ A Streamlit-based UI for:
 - Interactive playground for visual search
 """
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
