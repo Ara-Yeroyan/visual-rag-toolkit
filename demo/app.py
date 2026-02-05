@@ -1,13 +1,19 @@
 """Main entry point for the Visual RAG Toolkit demo application."""
 
 import os
+import sys
 from pathlib import Path
+
+# Ensure repo root is in sys.path for local development
+# (In HF Space / Docker, PYTHONPATH is already set correctly)
+_app_dir = Path(__file__).resolve().parent
+_repo_root = _app_dir.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 
 from dotenv import load_dotenv
 
 # Load .env from the repo root (works both locally and in Docker)
-_app_dir = Path(__file__).parent
-_repo_root = _app_dir.parent
 if (_repo_root / ".env").exists():
     load_dotenv(_repo_root / ".env")
 if (_app_dir / ".env").exists():
