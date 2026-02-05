@@ -52,13 +52,11 @@ def demo(
     cmd = [sys.executable, "-m", "streamlit", "run", str(app_path)]
     cmd += ["--server.address", str(host)]
     cmd += ["--server.port", str(int(port))]
-    cmd += ["--server.headless", "true" if headless else "false"]
+    # headless=true prevents browser from auto-opening; open_browser overrides
+    should_be_headless = headless and not open_browser
+    cmd += ["--server.headless", "true" if should_be_headless else "false"]
     cmd += ["--browser.gatherUsageStats", "false"]
     cmd += ["--server.runOnSave", "false"]
-    cmd += ["--browser.serverAddress", str(host)]
-    if not open_browser:
-        cmd += ["--browser.serverPort", str(int(port))]
-        cmd += ["--browser.open", "false"]
 
     if extra_args:
         cmd += list(extra_args)

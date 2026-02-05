@@ -22,7 +22,6 @@ from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import torch
-
 from qdrant_client.http import models as qdrant_models
 from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
 

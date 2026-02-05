@@ -335,7 +335,9 @@ class QdrantIndexer:
                 return val.tolist()
             return val
 
-        def _build_qdrant_points(batch_points: List[Dict[str, Any]]) -> List[qdrant_models.PointStruct]:
+        def _build_qdrant_points(
+            batch_points: List[Dict[str, Any]],
+        ) -> List[qdrant_models.PointStruct]:
             qdrant_points: List[qdrant_models.PointStruct] = []
             for p in batch_points:
                 global_pooled = p.get("global_pooled_embedding")
@@ -382,7 +384,7 @@ class QdrantIndexer:
                 )
 
                 logger.info(f"   ✅ Uploaded {len(points)} points to Qdrant")
-                
+
                 if delay_between_batches > 0:
                     if _is_cancelled():
                         return 0

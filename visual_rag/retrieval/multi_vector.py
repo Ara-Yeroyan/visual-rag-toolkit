@@ -56,14 +56,10 @@ class MultiVectorRetriever:
                 )
 
             qdrant_url = (
-                qdrant_url
-                or os.getenv("QDRANT_URL")
-                or os.getenv("SIGIR_QDRANT_URL")  # legacy
+                qdrant_url or os.getenv("QDRANT_URL") or os.getenv("SIGIR_QDRANT_URL")  # legacy
             )
             if not qdrant_url:
-                raise ValueError(
-                    "QDRANT_URL is required (pass qdrant_url or set env var)."
-                )
+                raise ValueError("QDRANT_URL is required (pass qdrant_url or set env var).")
 
             qdrant_api_key = (
                 qdrant_api_key
@@ -97,7 +93,10 @@ class MultiVectorRetriever:
                     _ = client.get_collections()
                 except Exception as e:
                     msg = str(e)
-                    if "StatusCode.PERMISSION_DENIED" in msg or "http2 header with status: 403" in msg:
+                    if (
+                        "StatusCode.PERMISSION_DENIED" in msg
+                        or "http2 header with status: 403" in msg
+                    ):
                         client = _make_client(False)
                     else:
                         raise

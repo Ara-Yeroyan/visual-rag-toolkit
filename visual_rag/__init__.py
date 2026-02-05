@@ -39,11 +39,11 @@ __version__ = "0.1.3"
 def setup_logging(level: str = "INFO", format: str = None) -> None:
     """
     Configure logging for visual_rag package.
-    
+
     Args:
         level: Log level ("DEBUG", "INFO", "WARNING", "ERROR")
         format: Custom format string. Default shows time, level, and message.
-    
+
     Example:
         >>> import visual_rag
         >>> visual_rag.setup_logging("INFO")
@@ -51,13 +51,13 @@ def setup_logging(level: str = "INFO", format: str = None) -> None:
     """
     if format is None:
         format = "[%(asctime)s] %(levelname)s - %(message)s"
-    
+
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format=format,
         datefmt="%H:%M:%S",
     )
-    
+
     # Also set the visual_rag logger specifically
     logger = logging.getLogger("visual_rag")
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
@@ -111,13 +111,16 @@ try:
 except ImportError:
     QdrantAdmin = None
 
-try:
-    from visual_rag.demo_runner import demo
-except ImportError:
-    demo = None
+# demo is lazily imported to avoid RuntimeWarning when running as __main__
+# Access via visual_rag.demo() which triggers __getattr__
 
 # Config utilities (always available)
-from visual_rag.config import get, get_section, load_config
+try:
+    from visual_rag.config import get, get_section, load_config
+except ImportError:
+    get = None
+    get_section = None
+    load_config = None
 
 __all__ = [
     # Version
@@ -138,3 +141,15 @@ __all__ = [
     # Logging
     "setup_logging",
 ]
+
+
+def __getattr__(name: str):
+    """Lazy import for demo to avoid RuntimeWarning when running as __main__."""
+    if name == "demo":
+        try:
+            from visual_rag.demo_runner import demo
+
+            return demo
+        except ImportError:
+            return None
+    raise AttributeError(f"module 'visual_rag' has no attribute {name!r}")
