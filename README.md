@@ -3,8 +3,11 @@
 [![PyPI](https://img.shields.io/pypi/v/visual-rag-toolkit)](https://pypi.org/project/visual-rag-toolkit/)
 [![Python](https://img.shields.io/pypi/pyversions/visual-rag-toolkit)](https://pypi.org/project/visual-rag-toolkit/)
 [![License](https://img.shields.io/pypi/l/visual-rag-toolkit)](LICENSE)
+[![Demo](https://img.shields.io/badge/Demo-Hugging%20Face-yellow)](https://huggingface.co/spaces/Yeroyan/visual-rag-toolkit)
 
 End-to-end visual document retrieval toolkit featuring **fast multi-stage retrieval** (prefetch with pooled vectors + exact MaxSim reranking).
+
+**[Try the Live Demo](https://huggingface.co/spaces/Yeroyan/visual-rag-toolkit)** - Upload PDFs, index to Qdrant, and query with visual retrieval.
 
 This repo contains:
 - a **Python package** (`visual_rag`)
@@ -283,7 +286,7 @@ If you use this toolkit in your research, please cite:
 
 ```bibtex
 @software{visual_rag_toolkit,
-  title = {Visual RAG Toolkit: Scalable Visual Document Retrieval with Two-Stage Pooling},
+  title = {Visual RAG Toolkit: Scalable Visual Document Retrieval with 1D Convolutional Pooling},
   author = {Ara Yeroyan},
   year = {2026},
   url = {https://github.com/Ara-Yeroyan/visual-rag-toolkit}
