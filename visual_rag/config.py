@@ -150,11 +150,12 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
             final_key = path[-1]
             if final_key in current:
                 existing_type = type(current[final_key])
-                if existing_type == bool:
+                # Use `is` for type comparisons (Ruff E721).
+                if existing_type is bool:
                     value = value.lower() in ("true", "1", "yes", "on")
-                elif existing_type == int:
+                elif existing_type is int:
                     value = int(value)
-                elif existing_type == float:
+                elif existing_type is float:
                     value = float(value)
 
             current[final_key] = value
