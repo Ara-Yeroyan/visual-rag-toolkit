@@ -449,7 +449,7 @@ def process_pdfs(uploaded_files, config):
         
         if total_uploaded > 0:
             st.session_state["upload_success"] = f"Uploaded {total_uploaded} pages to {collection_name}"
-            st.balloons()
+            st.rerun()  # Immediately refresh to show success toast + balloons
             
     except Exception as e:
         st.error(f"❌ Processing error: {e}")

@@ -16,6 +16,28 @@ from demo.qdrant_utils import (
 
 
 def render_sidebar():
+    # CSS to make sidebar metrics smaller
+    st.markdown("""
+    <style>
+    /* Smaller metrics in sidebar */
+    [data-testid="stSidebar"] [data-testid="stMetricValue"] {
+        font-size: 1.2rem !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stMetricLabel"] {
+        font-size: 0.75rem !important;
+    }
+    /* Smaller expander headers in sidebar */
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary {
+        font-size: 0.9rem !important;
+    }
+    /* Compact subheaders */
+    [data-testid="stSidebar"] h3 {
+        font-size: 1rem !important;
+        margin-bottom: 0.5rem !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
     with st.sidebar:
         st.subheader("🔑 Qdrant Credentials")
         
