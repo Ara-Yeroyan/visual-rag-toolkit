@@ -55,14 +55,14 @@ def generate_saliency_map(
     if hasattr(query_embedding, "numpy"):
         query_np = query_embedding.numpy()
     elif hasattr(query_embedding, "cpu"):
-        query_np = query_embedding.cpu().numpy()
+        query_np = query_embedding.cpu().float().numpy()  # .float() for BFloat16
     else:
         query_np = np.array(query_embedding, dtype=np.float32)
 
     if hasattr(doc_embedding, "numpy"):
         doc_np = doc_embedding.numpy()
     elif hasattr(doc_embedding, "cpu"):
-        doc_np = doc_embedding.cpu().numpy()
+        doc_np = doc_embedding.cpu().float().numpy()  # .float() for BFloat16
     else:
         doc_np = np.array(doc_embedding, dtype=np.float32)
 

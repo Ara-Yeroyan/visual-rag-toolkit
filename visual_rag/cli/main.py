@@ -288,7 +288,7 @@ def cmd_search(args):
         )
 
     # Search
-    query_np = query_embedding.detach().cpu().numpy()
+    query_np = query_embedding.detach().cpu().float().numpy()  # .float() for BFloat16
     if args.strategy == "single_full":
         results = single_stage.search(
             query_embedding=query_np,

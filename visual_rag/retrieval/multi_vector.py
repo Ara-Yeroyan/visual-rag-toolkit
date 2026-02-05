@@ -157,9 +157,10 @@ class MultiVectorRetriever:
     ) -> List[Dict[str, Any]]:
         q = self.embedder.embed_query(query)
         if isinstance(q, torch.Tensor):
-            query_embedding = q.detach().cpu().numpy()
+            # .float() converts BFloat16 to Float32 (numpy doesn't support BFloat16)
+            query_embedding = q.detach().cpu().float().numpy()
         else:
-            query_embedding = np.asarray(q)
+            query_embedding = np.asarray(q, dtype=np.float32)
 
         return self.search_embedded(
             query_embedding=query_embedding,

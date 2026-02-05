@@ -418,7 +418,7 @@ class TwoStageRetriever:
         if isinstance(embedding, torch.Tensor):
             if embedding.dtype == torch.bfloat16:
                 return embedding.cpu().float().numpy()
-            return embedding.cpu().numpy()
+            return embedding.cpu().float().numpy()  # .float() for BFloat16 compatibility
         return np.array(embedding, dtype=np.float32)
 
     def build_filter(
