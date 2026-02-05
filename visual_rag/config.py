@@ -21,16 +21,13 @@ _raw_config_cache_path: Optional[str] = None
 
 
 def _env_qdrant_url() -> Optional[str]:
-    return os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL")
+    """Get Qdrant URL from environment. Prefers QDRANT_URL."""
+    return os.getenv("QDRANT_URL") or os.getenv("SIGIR_QDRANT_URL")  # legacy fallback
 
 
 def _env_qdrant_api_key() -> Optional[str]:
-    return (
-        os.getenv("SIGIR_QDRANT_KEY")
-        or os.getenv("SIGIR_QDRANT_API_KEY")
-        or os.getenv("DEST_QDRANT_API_KEY")
-        or os.getenv("QDRANT_API_KEY")
-    )
+    """Get Qdrant API key from environment. Prefers QDRANT_API_KEY."""
+    return os.getenv("QDRANT_API_KEY") or os.getenv("SIGIR_QDRANT_KEY")  # legacy fallback
 
 
 def load_config(

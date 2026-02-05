@@ -17,10 +17,16 @@ Research Context:
 """
 
 import logging
+import time
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import torch
+
+from qdrant_client.http import models as qdrant_models
+from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
+
+from visual_rag.embedding.pooling import compute_maxsim_score
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +88,6 @@ class TwoStageRetriever:
         self.retry_sleep = float(retry_sleep)
 
     def _retry_call(self, fn):
-        import time
-
         last_err = None
         for attempt in range(self.max_retries):
             try:
@@ -120,8 +124,6 @@ class TwoStageRetriever:
         Returns:
             List of results with scores
         """
-        from qdrant_client.http import models
-
         query_np = self._to_numpy(query_embedding)
 
         if prefetch_k is None:
@@ -155,9 +157,9 @@ class TwoStageRetriever:
                 limit=top_k,
                 query_filter=filter_obj,
                 with_payload=True,
-                search_params=models.SearchParams(exact=True),
+                search_params=qdrant_models.SearchParams(exact=True),
                 prefetch=[
-                    models.Prefetch(
+                    qdrant_models.Prefetch(
                         query=prefetch_query,
                         using=prefetch_using,
                         limit=prefetch_k,
@@ -363,8 +365,6 @@ class TwoStageRetriever:
         return_embeddings: bool = False,
     ) -> List[Dict[str, Any]]:
         """Stage 2: Rerank with full multi-vector MaxSim scoring."""
-        from visual_rag.embedding.pooling import compute_maxsim_score
-
         # Fetch full embeddings for candidates
         candidate_ids = [c["id"] for c in candidates]
 
@@ -435,8 +435,6 @@ class TwoStageRetriever:
 
         Supports single values or lists (using MatchAny).
         """
-        from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
-
         conditions = []
 
         if year is not None:

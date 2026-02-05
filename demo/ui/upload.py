@@ -9,6 +9,7 @@ import inspect
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import streamlit as st
 
 from demo.config import AVAILABLE_MODELS
@@ -17,6 +18,10 @@ from demo.qdrant_utils import (
     get_collection_stats,
     sample_points_cached,
 )
+from visual_rag.embedding.visual_embedder import VisualEmbedder
+from visual_rag.indexing.qdrant_indexer import QdrantIndexer
+from visual_rag.indexing.cloudinary_uploader import CloudinaryUploader
+from visual_rag.indexing.pipeline import ProcessingPipeline
 
 
 VECTOR_TYPES = ["initial", "mean_pooling", "experimental_pooling", "global_pooling"]
@@ -250,10 +255,6 @@ def process_pdfs(uploaded_files, config):
             model_status = st.empty()
             model_short = model_name.split("/")[-1]
             model_status.info(f"Loading `{model_short}`...")
-            
-            import numpy as np
-            from visual_rag import VisualEmbedder
-            from visual_rag.indexing import QdrantIndexer, CloudinaryUploader, ProcessingPipeline
             
             output_dtype = np.float16 if vector_dtype == "float16" else np.float32
             embedder_key = f"{model_name}::{vector_dtype}"

@@ -9,6 +9,7 @@ from demo.qdrant_utils import (
     sample_points_cached,
     search_collection,
 )
+from visual_rag.retrieval import MultiVectorRetriever
 
 
 def render_playground_tab():
@@ -46,7 +47,6 @@ def render_playground_tab():
         if not st.session_state.get("model_loaded"):
             with st.spinner(f"Loading {model_short}..."):
                 try:
-                    from visual_rag.retrieval import MultiVectorRetriever
                     _ = MultiVectorRetriever(collection_name=active_collection, model_name=model_name)
                     st.session_state["model_loaded"] = True
                     st.session_state["loaded_model_key"] = cache_key

@@ -19,6 +19,23 @@ from urllib.parse import urlparse
 
 import numpy as np
 
+try:
+    from qdrant_client import QdrantClient
+    from qdrant_client.http import models as qdrant_models
+    from qdrant_client.http.models import Distance, VectorParams
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    QDRANT_AVAILABLE = True
+except ImportError:
+    QDRANT_AVAILABLE = False
+    QdrantClient = None
+    qdrant_models = None
+    Distance = None
+    VectorParams = None
+    FieldCondition = None
+    Filter = None
+    MatchValue = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,9 +75,7 @@ class QdrantIndexer:
         prefer_grpc: bool = False,
         vector_datatype: str = "float32",
     ):
-        try:
-            from qdrant_client import QdrantClient
-        except ImportError:
+        if not QDRANT_AVAILABLE:
             raise ImportError(
                 "Qdrant client not installed. "
                 "Install with: pip install visual-rag-toolkit[qdrant]"
@@ -139,9 +154,6 @@ class QdrantIndexer:
         Returns:
             True if created, False if already existed
         """
-        from qdrant_client.http import models
-        from qdrant_client.http.models import Distance, VectorParams
-
         if self.collection_exists():
             if force_recreate:
                 logger.info(f"🗑️ Deleting existing collection: {self.collection_name}")
@@ -153,15 +165,15 @@ class QdrantIndexer:
         logger.info(f"📦 Creating collection: {self.collection_name}")
 
         # Multi-vector config for ColBERT-style MaxSim
-        multivector_config = models.MultiVectorConfig(
-            comparator=models.MultiVectorComparator.MAX_SIM
+        multivector_config = qdrant_models.MultiVectorConfig(
+            comparator=qdrant_models.MultiVectorComparator.MAX_SIM
         )
 
         # Vector configs - simplified for compatibility
         datatype = (
-            models.Datatype.FLOAT16
+            qdrant_models.Datatype.FLOAT16
             if self.vector_datatype == "float16"
-            else models.Datatype.FLOAT32
+            else qdrant_models.Datatype.FLOAT32
         )
         vectors_config = {
             "initial": VectorParams(
@@ -198,6 +210,18 @@ class QdrantIndexer:
             vectors_config=vectors_config,
         )
 
+        # Create required payload index for skip_existing functionality
+        # This index is needed for filtering by filename when checking existing docs
+        try:
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="filename",
+                field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
+            )
+            logger.info("   📇 Created payload index: filename")
+        except Exception as e:
+            logger.warning(f"   ⚠️ Could not create filename index: {e}")
+
         logger.info(f"✅ Collection created: {self.collection_name}")
         return True
 
@@ -212,14 +236,12 @@ class QdrantIndexer:
             fields: List of {field, type} dicts
                    type can be: integer, keyword, bool, float, text
         """
-        from qdrant_client.http import models
-
         type_mapping = {
-            "integer": models.PayloadSchemaType.INTEGER,
-            "keyword": models.PayloadSchemaType.KEYWORD,
-            "bool": models.PayloadSchemaType.BOOL,
-            "float": models.PayloadSchemaType.FLOAT,
-            "text": models.PayloadSchemaType.TEXT,
+            "integer": qdrant_models.PayloadSchemaType.INTEGER,
+            "keyword": qdrant_models.PayloadSchemaType.KEYWORD,
+            "bool": qdrant_models.PayloadSchemaType.BOOL,
+            "float": qdrant_models.PayloadSchemaType.FLOAT,
+            "text": qdrant_models.PayloadSchemaType.TEXT,
         }
 
         if not fields:
@@ -230,7 +252,7 @@ class QdrantIndexer:
         for field_config in fields:
             field_name = field_config["field"]
             field_type_str = field_config.get("type", "keyword")
-            field_type = type_mapping.get(field_type_str, models.PayloadSchemaType.KEYWORD)
+            field_type = type_mapping.get(field_type_str, qdrant_models.PayloadSchemaType.KEYWORD)
 
             try:
                 self.client.create_payload_index(
@@ -271,8 +293,6 @@ class QdrantIndexer:
         Returns:
             Number of successfully uploaded points
         """
-        from qdrant_client.http import models
-
         if not points:
             return 0
 
@@ -315,8 +335,8 @@ class QdrantIndexer:
                 return val.tolist()
             return val
 
-        def _build_qdrant_points(batch_points: List[Dict[str, Any]]) -> List[models.PointStruct]:
-            qdrant_points: List[models.PointStruct] = []
+        def _build_qdrant_points(batch_points: List[Dict[str, Any]]) -> List[qdrant_models.PointStruct]:
+            qdrant_points: List[qdrant_models.PointStruct] = []
             for p in batch_points:
                 global_pooled = p.get("global_pooled_embedding")
                 if global_pooled is None:
@@ -336,7 +356,7 @@ class QdrantIndexer:
                 global_pooling = global_pooled.astype(self._np_vector_dtype, copy=False)
 
                 qdrant_points.append(
-                    models.PointStruct(
+                    qdrant_models.PointStruct(
                         id=p["id"],
                         vector={
                             "initial": _to_list(initial),
@@ -413,32 +433,60 @@ class QdrantIndexer:
             return False
 
     def get_existing_ids(self, filename: str) -> Set[str]:
-        """Get all point IDs for a specific file."""
-        from qdrant_client.models import FieldCondition, Filter, MatchValue
+        """Get all point IDs for a specific file.
 
+        Requires a payload index on 'filename' field. If the index doesn't exist,
+        this method will attempt to create it automatically.
+        """
         existing_ids = set()
         offset = None
 
-        while True:
-            results = self.client.scroll(
-                collection_name=self.collection_name,
-                scroll_filter=Filter(
-                    must=[FieldCondition(key="filename", match=MatchValue(value=filename))]
-                ),
-                limit=100,
-                offset=offset,
-                with_payload=["page_number"],
-                with_vectors=False,
-            )
+        try:
+            while True:
+                results = self.client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=Filter(
+                        must=[FieldCondition(key="filename", match=MatchValue(value=filename))]
+                    ),
+                    limit=100,
+                    offset=offset,
+                    with_payload=["page_number"],
+                    with_vectors=False,
+                )
 
-            points, next_offset = results
+                points, next_offset = results
 
-            for point in points:
-                existing_ids.add(str(point.id))
+                for point in points:
+                    existing_ids.add(str(point.id))
 
-            if next_offset is None or len(points) == 0:
-                break
-            offset = next_offset
+                if next_offset is None or len(points) == 0:
+                    break
+                offset = next_offset
+
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "index required" in error_msg or "index" in error_msg and "filename" in error_msg:
+                # Missing payload index - try to create it
+                logger.warning(
+                    "⚠️ Missing 'filename' payload index. Creating it now... "
+                    "(skip_existing requires this index for filtering)"
+                )
+                try:
+                    self.client.create_payload_index(
+                        collection_name=self.collection_name,
+                        field_name="filename",
+                        field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
+                    )
+                    logger.info("   ✅ Created 'filename' index. Retrying query...")
+                    # Retry the query
+                    return self.get_existing_ids(filename)
+                except Exception as idx_err:
+                    logger.warning(f"   ❌ Could not create index: {idx_err}")
+                    logger.warning("   Returning empty set - all pages will be processed")
+                    return set()
+            else:
+                logger.warning(f"⚠️ Error checking existing IDs: {e}")
+                return set()
 
         return existing_ids
 

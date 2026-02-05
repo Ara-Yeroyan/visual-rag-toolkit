@@ -3,6 +3,8 @@
 import os
 import streamlit as st
 
+from qdrant_client.models import VectorParamsDiff
+
 from demo.qdrant_utils import (
     get_qdrant_credentials,
     init_qdrant_client_with_creds,
@@ -17,8 +19,8 @@ def render_sidebar():
     with st.sidebar:
         st.subheader("🔑 Qdrant Credentials")
         
-        env_url = os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL") or ""
-        env_key = os.getenv("SIGIR_QDRANT_KEY") or os.getenv("SIGIR_QDRANT_API_KEY") or os.getenv("DEST_QDRANT_API_KEY") or os.getenv("QDRANT_API_KEY") or ""
+        env_url = os.getenv("QDRANT_URL") or os.getenv("SIGIR_QDRANT_URL") or ""
+        env_key = os.getenv("QDRANT_API_KEY") or os.getenv("SIGIR_QDRANT_KEY") or ""
         
         if "qdrant_url_input" not in st.session_state:
             st.session_state["qdrant_url_input"] = env_url
@@ -136,7 +138,6 @@ def render_sidebar():
                         if target_in_ram != current_in_ram:
                             if st.button("💾 Apply Change", key="admin_apply"):
                                 try:
-                                    from qdrant_client.models import VectorParamsDiff
                                     client.update_collection(
                                         collection_name=active,
                                         vectors_config={sel_vec: VectorParamsDiff(on_disk=not target_in_ram)}

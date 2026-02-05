@@ -2,6 +2,25 @@ import os
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
+import numpy as np
+import torch
+
+try:
+    from dotenv import load_dotenv
+
+    DOTENV_AVAILABLE = True
+except ImportError:
+    DOTENV_AVAILABLE = False
+    load_dotenv = None
+
+try:
+    from qdrant_client import QdrantClient
+
+    QDRANT_AVAILABLE = True
+except ImportError:
+    QDRANT_AVAILABLE = False
+    QdrantClient = None
+
 from visual_rag.embedding.visual_embedder import VisualEmbedder
 from visual_rag.retrieval.single_stage import SingleStageRetriever
 from visual_rag.retrieval.three_stage import ThreeStageRetriever
@@ -11,9 +30,7 @@ from visual_rag.retrieval.two_stage import TwoStageRetriever
 class MultiVectorRetriever:
     @staticmethod
     def _maybe_load_dotenv() -> None:
-        try:
-            from dotenv import load_dotenv
-        except ImportError:
+        if not DOTENV_AVAILABLE:
             return
         if os.path.exists(".env"):
             load_dotenv(".env")
@@ -33,87 +50,84 @@ class MultiVectorRetriever:
     ):
         if qdrant_client is None:
             self._maybe_load_dotenv()
-            try:
-                from qdrant_client import QdrantClient
-            except ImportError as e:
+            if not QDRANT_AVAILABLE:
                 raise ImportError(
                     "Qdrant client not installed. Install with: pip install visual-rag-toolkit[qdrant]"
-                ) from e
+                )
 
             qdrant_url = (
                 qdrant_url
-                or os.getenv("SIGIR_QDRANT_URL")
-                or os.getenv("DEST_QDRANT_URL")
                 or os.getenv("QDRANT_URL")
+                or os.getenv("SIGIR_QDRANT_URL")  # legacy
             )
             if not qdrant_url:
                 raise ValueError(
-                    "QDRANT_URL is required (pass qdrant_url or set env var). "
-                    "You can also set DEST_QDRANT_URL to override."
+                    "QDRANT_URL is required (pass qdrant_url or set env var)."
                 )
 
             qdrant_api_key = (
                 qdrant_api_key
-                or os.getenv("SIGIR_QDRANT_KEY")
-                or os.getenv("SIGIR_QDRANT_API_KEY")
-                or os.getenv("DEST_QDRANT_API_KEY")
                 or os.getenv("QDRANT_API_KEY")
+                or os.getenv("SIGIR_QDRANT_KEY")  # legacy
             )
 
             grpc_port = None
             if prefer_grpc:
                 try:
-                    if urlparse(qdrant_url).port == 6333:
+                    parsed = urlparse(qdrant_url)
+                    port = parsed.port
+                    if port == 6333:
                         grpc_port = 6334
                 except Exception:
-                    grpc_port = None
+                    pass
 
             def _make_client(use_grpc: bool):
                 return QdrantClient(
                     url=qdrant_url,
                     api_key=qdrant_api_key,
+                    timeout=request_timeout,
                     prefer_grpc=bool(use_grpc),
                     grpc_port=grpc_port,
-                    timeout=int(request_timeout),
                     check_compatibility=False,
                 )
 
-            qdrant_client = _make_client(prefer_grpc)
+            client = _make_client(prefer_grpc)
             if prefer_grpc:
                 try:
-                    _ = qdrant_client.get_collections()
+                    _ = client.get_collections()
                 except Exception as e:
                     msg = str(e)
-                    if (
-                        "StatusCode.PERMISSION_DENIED" in msg
-                        or "http2 header with status: 403" in msg
-                    ):
-                        qdrant_client = _make_client(False)
+                    if "StatusCode.PERMISSION_DENIED" in msg or "http2 header with status: 403" in msg:
+                        client = _make_client(False)
                     else:
                         raise
+            qdrant_client = client
 
         self.client = qdrant_client
         self.collection_name = collection_name
+
         self.embedder = embedder or VisualEmbedder(model_name=model_name)
 
         self._two_stage = TwoStageRetriever(
-            self.client,
-            collection_name=self.collection_name,
-            request_timeout=int(request_timeout),
-            max_retries=int(max_retries),
-            retry_sleep=float(retry_sleep),
+            qdrant_client=qdrant_client,
+            collection_name=collection_name,
+            request_timeout=request_timeout,
+            max_retries=max_retries,
+            retry_sleep=retry_sleep,
         )
         self._three_stage = ThreeStageRetriever(
-            self.client,
-            collection_name=self.collection_name,
-            request_timeout=int(request_timeout),
-            max_retries=int(max_retries),
-            retry_sleep=float(retry_sleep),
+            qdrant_client=qdrant_client,
+            collection_name=collection_name,
+            request_timeout=request_timeout,
+            max_retries=max_retries,
+            retry_sleep=retry_sleep,
         )
         self._single_stage = SingleStageRetriever(
-            self.client,
-            collection_name=self.collection_name,
-            request_timeout=int(request_timeout),
+            qdrant_client=qdrant_client,
+            collection_name=collection_name,
+            request_timeout=request_timeout,
+            max_retries=max_retries,
+            retry_sleep=retry_sleep,
         )
 
     def build_filter(
@@ -143,14 +157,10 @@ class MultiVectorRetriever:
         return_embeddings: bool = False,
     ) -> List[Dict[str, Any]]:
         q = self.embedder.embed_query(query)
-        try:
-            import torch
-        except ImportError:
-            torch = None
-        if torch is not None and isinstance(q, torch.Tensor):
+        if isinstance(q, torch.Tensor):
             query_embedding = q.detach().cpu().numpy()
         else:
-            query_embedding = q.numpy()
+            query_embedding = np.asarray(q)
 
         return self.search_embedded(
             query_embedding=query_embedding,
@@ -179,27 +189,17 @@ class MultiVectorRetriever:
             return self._single_stage.search(
                 query_embedding=query_embedding,
                 top_k=top_k,
-                strategy="multi_vector",
                 filter_obj=filter_obj,
+                using="initial",
             )
-
-        if mode == "single_tiles":
+        elif mode == "single_pooled":
             return self._single_stage.search(
                 query_embedding=query_embedding,
                 top_k=top_k,
-                strategy="tiles_maxsim",
                 filter_obj=filter_obj,
+                using="mean_pooling",
             )
-
-        if mode == "single_global":
-            return self._single_stage.search(
-                query_embedding=query_embedding,
-                top_k=top_k,
-                strategy="pooled_global",
-                filter_obj=filter_obj,
-            )
-
-        if mode == "two_stage":
+        elif mode == "two_stage":
             return self._two_stage.search_server_side(
                 query_embedding=query_embedding,
                 top_k=top_k,
@@ -207,16 +207,14 @@ class MultiVectorRetriever:
                 filter_obj=filter_obj,
                 stage1_mode=stage1_mode,
             )
-
-        if mode == "three_stage":
-            s1 = int(stage1_k) if stage1_k is not None else 1000
-            s2 = int(stage2_k) if stage2_k is not None else 300
+        elif mode == "three_stage":
             return self._three_stage.search_server_side(
                 query_embedding=query_embedding,
                 top_k=top_k,
-                stage1_k=s1,
-                stage2_k=s2,
+                stage1_k=stage1_k,
+                stage2_k=stage2_k,
                 filter_obj=filter_obj,
+                stage1_mode=stage1_mode,
             )
-
-        raise ValueError(f"Unknown mode: {mode}")
+        else:
+            raise ValueError(f"Unknown mode: {mode}")

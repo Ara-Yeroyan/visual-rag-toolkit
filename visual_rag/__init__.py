@@ -31,7 +31,7 @@ Quick Start:
 Each component works independently - use only what you need.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.3"
 
 # Import main classes at package level for convenience
 # These are optional - if dependencies aren't installed, we catch the error

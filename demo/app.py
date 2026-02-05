@@ -1,13 +1,17 @@
 """Main entry point for the Visual RAG Toolkit demo application."""
 
-import sys
+import os
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT_DIR))
-
 from dotenv import load_dotenv
-load_dotenv(ROOT_DIR / ".env")
+
+# Load .env from the repo root (works both locally and in Docker)
+_app_dir = Path(__file__).parent
+_repo_root = _app_dir.parent
+if (_repo_root / ".env").exists():
+    load_dotenv(_repo_root / ".env")
+if (_app_dir / ".env").exists():
+    load_dotenv(_app_dir / ".env")
 
 import streamlit as st
 
@@ -28,15 +32,17 @@ from demo.ui.benchmark import render_benchmark_tab
 def main():
     render_header()
     render_sidebar()
-    
-    tab_upload, tab_playground, tab_benchmark = st.tabs(["📤 Upload", "🎮 Playground", "📊 Benchmarking"])
-    
+
+    tab_upload, tab_playground, tab_benchmark = st.tabs(
+        ["📤 Upload", "🎮 Playground", "📊 Benchmarking"]
+    )
+
     with tab_upload:
         render_upload_tab()
-    
+
     with tab_playground:
         render_playground_tab()
-    
+
     with tab_benchmark:
         render_benchmark_tab()
 
