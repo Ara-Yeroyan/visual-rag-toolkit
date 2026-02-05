@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.21.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -7,7 +7,7 @@ name = "visual-rag-toolkit"
 version = "0.1.0"
 description = "End-to-end visual document retrieval with ColPali, featuring two-stage pooling for scalable search"
 readme = "README.md"
-license = {text = "MIT"}
+license = {file = "LICENSE"}
 requires-python = ">=3.9"
 authors = [
     {name = "Visual RAG Team"}
@@ -77,7 +77,19 @@ ui = [
 
 # All dependencies
 all = [
-    "visual-rag-toolkit[embedding,pdf,qdrant,cloudinary,ui]",
+    # embedding
+    "colpali-engine>=0.3.0",
+    "transformers>=4.35.0",
+    # pdf
+    "pdf2image>=1.16.0",
+    "pypdf>=3.0.0",
+    # qdrant
+    "qdrant-client>=1.7.0",
+    # cloudinary
+    "cloudinary>=1.30.0",
+    # ui
+    "streamlit>=1.25.0",
+    "httpx>=0.24.0",
 ]
 
 # Development dependencies
@@ -93,13 +105,29 @@ dev = [
 visual-rag = "visual_rag.cli.main:main"
 
 [project.urls]
-Homepage = "https://github.com/your-org/visual-rag-toolkit"
-Documentation = "https://github.com/your-org/visual-rag-toolkit#readme"
-Repository = "https://github.com/your-org/visual-rag-toolkit"
-Issues = "https://github.com/your-org/visual-rag-toolkit/issues"
+Homepage = "https://github.com/Ara-Yeroyan/visual-rag-toolkit"
+Documentation = "https://github.com/Ara-Yeroyan/visual-rag-toolkit#readme"
+Repository = "https://github.com/Ara-Yeroyan/visual-rag-toolkit"
+Issues = "https://github.com/Ara-Yeroyan/visual-rag-toolkit/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["visual_rag"]
+packages = ["visual_rag", "benchmarks"]
+
+[tool.hatch.build.targets.sdist]
+# Keep source distributions clean (no local artifacts, eval results, caches).
+exclude = [
+  "/results",
+  "/checkpoints",
+  "/.cache",
+  "/.streamlit",
+  "/.env",
+  "/.env.*",
+  "/**/__pycache__",
+  "/**/*.pyc",
+  "/**/*.pyo",
+  "/**/*.pyd",
+  "/**/.DS_Store",
+]
 
 [tool.ruff]
 line-length = 100
