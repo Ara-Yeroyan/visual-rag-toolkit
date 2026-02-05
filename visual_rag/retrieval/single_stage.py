@@ -30,6 +30,9 @@ class SingleStageRetriever:
     Args:
         qdrant_client: Connected Qdrant client
         collection_name: Name of the Qdrant collection
+        request_timeout: Timeout for Qdrant requests (seconds)
+        max_retries: Number of retry attempts on failure
+        retry_sleep: Sleep time between retries (seconds)
 
     Example:
         >>> retriever = SingleStageRetriever(client, "my_collection")
@@ -41,10 +44,14 @@ class SingleStageRetriever:
         qdrant_client,
         collection_name: str,
         request_timeout: int = 120,
+        max_retries: int = 3,
+        retry_sleep: float = 1.0,
     ):
         self.client = qdrant_client
         self.collection_name = collection_name
         self.request_timeout = int(request_timeout)
+        self.max_retries = max_retries
+        self.retry_sleep = retry_sleep
 
     def search(
         self,

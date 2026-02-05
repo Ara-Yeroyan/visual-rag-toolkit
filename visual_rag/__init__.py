@@ -31,7 +31,47 @@ Quick Start:
 Each component works independently - use only what you need.
 """
 
+import logging
+
 __version__ = "0.1.3"
+
+
+def setup_logging(level: str = "INFO", format: str = None) -> None:
+    """
+    Configure logging for visual_rag package.
+    
+    Args:
+        level: Log level ("DEBUG", "INFO", "WARNING", "ERROR")
+        format: Custom format string. Default shows time, level, and message.
+    
+    Example:
+        >>> import visual_rag
+        >>> visual_rag.setup_logging("INFO")
+        >>> # Now you'll see processing logs
+    """
+    if format is None:
+        format = "[%(asctime)s] %(levelname)s - %(message)s"
+    
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format=format,
+        datefmt="%H:%M:%S",
+    )
+    
+    # Also set the visual_rag logger specifically
+    logger = logging.getLogger("visual_rag")
+    logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+
+
+# Enable INFO logging by default for visual_rag package and all submodules
+# This ensures logs like "Processing PDF...", "Embedding pages..." are visible
+_logger = logging.getLogger("visual_rag")
+if not _logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S"))
+    _logger.addHandler(_handler)
+_logger.setLevel(logging.INFO)
+_logger.propagate = False  # Don't duplicate to root logger
 
 # Import main classes at package level for convenience
 # These are optional - if dependencies aren't installed, we catch the error
@@ -95,4 +135,6 @@ __all__ = [
     "load_config",
     "get",
     "get_section",
+    # Logging
+    "setup_logging",
 ]

@@ -381,6 +381,8 @@ class QdrantIndexer:
                     wait=wait,
                 )
 
+                logger.info(f"   ✅ Uploaded {len(points)} points to Qdrant")
+                
                 if delay_between_batches > 0:
                     if _is_cancelled():
                         return 0
