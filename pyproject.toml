@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "visual-rag-toolkit"
-version = "0.1.2"
+version = "0.1.3"
 description = "End-to-end visual document retrieval with ColPali, featuring two-stage pooling for scalable search"
 readme = "README.md"
 license = {file = "LICENSE"}

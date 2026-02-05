@@ -3,11 +3,6 @@
 [![PyPI](https://img.shields.io/pypi/v/visual-rag-toolkit)](https://pypi.org/project/visual-rag-toolkit/)
 [![Python](https://img.shields.io/pypi/pyversions/visual-rag-toolkit)](https://pypi.org/project/visual-rag-toolkit/)
 [![License](https://img.shields.io/pypi/l/visual-rag-toolkit)](LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/Ara-Yeroyan/visual-rag-toolkit/ci.yaml?branch=main)](https://github.com/Ara-Yeroyan/visual-rag-toolkit/actions/workflows/ci.yaml)
-
-Note:
-- The **PyPI badge** shows “not found” until the first release is published.
-- The **CI badge** requires the GitHub repo to be **public** (GitHub does not serve Actions badges for private repos).
 
 End-to-end visual document retrieval toolkit featuring **fast multi-stage retrieval** (prefetch with pooled vectors + exact MaxSim reranking).
 
@@ -77,7 +72,7 @@ for r in results[:3]:
 
 ### End-to-end: ingest PDFs (with cropping) → index in Qdrant
 
-This is the “SDK-style” pipeline: PDF → images → optional crop → embed → store vectors + payload in Qdrant.
+This is the "SDK-style" pipeline: PDF → images → optional crop → embed → store vectors + payload in Qdrant.
 
 ```python
 import os
@@ -89,8 +84,8 @@ import torch
 from visual_rag import VisualEmbedder
 from visual_rag.indexing import ProcessingPipeline, QdrantIndexer
 
-QDRANT_URL = os.environ["SIGIR_QDRANT_URL"]  # or QDRANT_URL
-QDRANT_KEY = os.getenv("SIGIR_QDRANT_KEY", "")  # or QDRANT_API_KEY
+QDRANT_URL = os.environ["QDRANT_URL"]
+QDRANT_KEY = os.getenv("QDRANT_API_KEY", "")
 
 collection = "my_visual_docs"
 
@@ -108,6 +103,8 @@ indexer = QdrantIndexer(
     prefer_grpc=True,
     vector_datatype="float16",
 )
+
+# Creates collection + required payload indexes (e.g., "filename" for skip_existing)
 indexer.create_collection(force_recreate=False)
 
 pipeline = ProcessingPipeline(
@@ -123,19 +120,32 @@ pipeline = ProcessingPipeline(
 
 pdfs = [Path("docs/a.pdf"), Path("docs/b.pdf")]
 for pdf_path in pdfs:
-    pipeline.process_pdf(
+    result = pipeline.process_pdf(
         pdf_path,
-        skip_existing=True,
+        skip_existing=True,  # Skip pages already in Qdrant (uses filename index)
         upload_to_cloudinary=False,
         upload_to_qdrant=True,
     )
+    # Logs automatically shown:
+    # [10:23:45] 📚 Processing PDF: a.pdf
+    # [10:23:45] 🖼️ Converting PDF to images...
+    # [10:23:46]    ✅ Converted 12 pages
+    # [10:23:46] 📦 Processing pages 1-8/12
+    # [10:23:46] 🤖 Generating embeddings for 8 pages...
+    # [10:23:48] 📤 Uploading batch of 8 pages...
+    # [10:23:48]    ✅ Uploaded 8 points to Qdrant
+    # [10:23:48] 📦 Processing pages 9-12/12
+    # [10:23:48] 🤖 Generating embeddings for 4 pages...
+    # [10:23:50] 📤 Uploading batch of 4 pages...
+    # [10:23:50]    ✅ Uploaded 4 points to Qdrant
+    # [10:23:50] ✅ Completed a.pdf: 12 uploaded, 0 skipped, 0 failed
 ```
 
 CLI equivalent:
 
 ```bash
-export SIGIR_QDRANT_URL="https://YOUR_QDRANT"
-export SIGIR_QDRANT_KEY="YOUR_KEY"
+export QDRANT_URL="https://YOUR_QDRANT"
+export QDRANT_API_KEY="YOUR_KEY"
 
 visual-rag process \
   --reports-dir ./docs \
@@ -178,7 +188,7 @@ Stage 2: Exact MaxSim reranking on candidates
          └── Return top-k results (e.g., 10)
 ```
 
-Three-stage extends this with an additional “cheap prefetch” stage before stage 2.
+Three-stage extends this with an additional "cheap prefetch" stage before stage 2.
 
 ## 📁 Package Structure
 
@@ -289,4 +299,3 @@ MIT License - see [LICENSE](LICENSE) for details.
 - [Qdrant](https://qdrant.tech/) - Vector database with multi-vector support
 - [ColPali](https://github.com/illuin-tech/colpali) - Visual document retrieval models
 - [ViDoRe](https://huggingface.co/spaces/vidore/vidore-leaderboard) - Benchmark dataset
-
