@@ -1,11 +1,13 @@
 """Evaluation runner with UI updates."""
 
 import hashlib
+import importlib.util
 import json
 import logging
 import time
 import traceback
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -23,8 +25,44 @@ TORCH_DTYPE_MAP = {
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
 from visual_rag.retrieval import MultiVectorRetriever
-from benchmarks.vidore_tatdqa_test.dataset_loader import load_vidore_beir_dataset
-from benchmarks.vidore_tatdqa_test.metrics import ndcg_at_k, mrr_at_k, recall_at_k
+
+
+def _load_local_benchmark_module(module_filename: str):
+    """
+    Load `benchmarks/vidore_tatdqa_test/<module_filename>` via file path.
+
+    Motivation:
+    - Some environments (notably containers / Spaces) can have a third-party
+      `benchmarks` package installed, causing `import benchmarks...` to resolve
+      to the wrong module.
+    - This fallback guarantees we load the repo's benchmark utilities.
+    """
+    root = Path(__file__).resolve().parents[1]  # demo/.. = repo root
+    target = root / "benchmarks" / "vidore_tatdqa_test" / module_filename
+    if not target.exists():
+        raise ModuleNotFoundError(f"Missing local benchmark module file: {target}")
+
+    name = f"_visual_rag_toolkit_local_{target.stem}"
+    spec = importlib.util.spec_from_file_location(name, str(target))
+    if spec is None or spec.loader is None:
+        raise ModuleNotFoundError(f"Could not load module spec for: {target}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    return mod
+
+
+try:
+    # Preferred: normal import
+    from benchmarks.vidore_tatdqa_test.dataset_loader import load_vidore_beir_dataset
+    from benchmarks.vidore_tatdqa_test.metrics import ndcg_at_k, mrr_at_k, recall_at_k
+except ModuleNotFoundError:
+    # Robust fallback: load from local file paths
+    _dl = _load_local_benchmark_module("dataset_loader.py")
+    _mx = _load_local_benchmark_module("metrics.py")
+    load_vidore_beir_dataset = _dl.load_vidore_beir_dataset
+    ndcg_at_k = _mx.ndcg_at_k
+    mrr_at_k = _mx.mrr_at_k
+    recall_at_k = _mx.recall_at_k
 
 from demo.qdrant_utils import get_qdrant_credentials
 

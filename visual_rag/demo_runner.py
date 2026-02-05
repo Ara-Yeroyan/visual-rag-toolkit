@@ -74,7 +74,9 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Launch the Visual RAG Toolkit Streamlit demo.")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=7860)
-    p.add_argument("--no-headless", action="store_true", help="Run with a browser window (not headless).")
+    p.add_argument(
+        "--no-headless", action="store_true", help="Run with a browser window (not headless)."
+    )
     p.add_argument("--open", action="store_true", help="Open browser automatically.")
     args, unknown = p.parse_known_args()
 
@@ -86,4 +88,3 @@ def main() -> None:
         extra_args=unknown,
     )
     raise SystemExit(rc)
-

@@ -7,8 +7,8 @@ This module provides:
 """
 
 from visual_rag.visualization.saliency import (
-    generate_saliency_map,
     create_saliency_overlay,
+    generate_saliency_map,
     visualize_search_results,
 )
 

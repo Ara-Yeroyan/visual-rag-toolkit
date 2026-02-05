@@ -4,8 +4,8 @@ from urllib.parse import urlparse
 
 from visual_rag.embedding.visual_embedder import VisualEmbedder
 from visual_rag.retrieval.single_stage import SingleStageRetriever
-from visual_rag.retrieval.two_stage import TwoStageRetriever
 from visual_rag.retrieval.three_stage import ThreeStageRetriever
+from visual_rag.retrieval.two_stage import TwoStageRetriever
 
 
 class MultiVectorRetriever:
@@ -67,6 +67,7 @@ class MultiVectorRetriever:
                         grpc_port = 6334
                 except Exception:
                     grpc_port = None
+
             def _make_client(use_grpc: bool):
                 return QdrantClient(
                     url=qdrant_url,
@@ -83,7 +84,10 @@ class MultiVectorRetriever:
                     _ = qdrant_client.get_collections()
                 except Exception as e:
                     msg = str(e)
-                    if "StatusCode.PERMISSION_DENIED" in msg or "http2 header with status: 403" in msg:
+                    if (
+                        "StatusCode.PERMISSION_DENIED" in msg
+                        or "http2 header with status: 403" in msg
+                    ):
                         qdrant_client = _make_client(False)
                     else:
                         raise
@@ -216,5 +220,3 @@ class MultiVectorRetriever:
             )
 
         raise ValueError(f"Unknown mode: {mode}")
-
-

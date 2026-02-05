@@ -33,9 +33,16 @@ def _resolve_qdrant_connection(
     import os
 
     _maybe_load_dotenv()
-    resolved_url = url or os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL")
+    resolved_url = (
+        url
+        or os.getenv("SIGIR_QDRANT_URL")
+        or os.getenv("DEST_QDRANT_URL")
+        or os.getenv("QDRANT_URL")
+    )
     if not resolved_url:
-        raise ValueError("Qdrant URL not set (pass url= or set SIGIR_QDRANT_URL/DEST_QDRANT_URL/QDRANT_URL).")
+        raise ValueError(
+            "Qdrant URL not set (pass url= or set SIGIR_QDRANT_URL/DEST_QDRANT_URL/QDRANT_URL)."
+        )
     resolved_key = (
         api_key
         or os.getenv("SIGIR_QDRANT_KEY")
@@ -105,7 +112,11 @@ class QdrantAdmin:
         from qdrant_client.http import models as m
 
         hnsw_diff = m.HnswConfigDiff(**hnsw_config) if isinstance(hnsw_config, dict) else None
-        params_diff = m.CollectionParamsDiff(**collection_params) if isinstance(collection_params, dict) else None
+        params_diff = (
+            m.CollectionParamsDiff(**collection_params)
+            if isinstance(collection_params, dict)
+            else None
+        )
         if hnsw_diff is None and params_diff is None:
             raise ValueError("No changes provided (pass hnsw_config and/or collection_params).")
         return bool(
@@ -143,7 +154,9 @@ class QdrantAdmin:
 
         missing = [str(k) for k in (vectors or {}).keys() if existing and str(k) not in existing]
         if missing:
-            raise ValueError(f"Vectors do not exist in collection '{collection_name}': {missing}. Existing: {sorted(existing)}")
+            raise ValueError(
+                f"Vectors do not exist in collection '{collection_name}': {missing}. Existing: {sorted(existing)}"
+            )
 
         ok = True
         for name, cfg in (vectors or {}).items():
@@ -158,13 +171,16 @@ class QdrantAdmin:
                 )
             }
 
-            ok = bool(
-                self.client.update_collection(
-                    collection_name=collection_name,
-                    vectors_config=vectors_diff,
-                    timeout=int(timeout) if timeout is not None else None,
+            ok = (
+                bool(
+                    self.client.update_collection(
+                        collection_name=collection_name,
+                        vectors_config=vectors_diff,
+                        timeout=int(timeout) if timeout is not None else None,
+                    )
                 )
-            ) and ok
+                and ok
+            )
 
         return ok
 
@@ -192,7 +208,9 @@ class QdrantAdmin:
             vectors[str(vname)] = {"on_disk": True, "hnsw_config": {"on_disk": True}}
 
         if vectors:
-            self.modify_collection_vector_config(collection_name=collection_name, vectors=vectors, timeout=timeout)
+            self.modify_collection_vector_config(
+                collection_name=collection_name, vectors=vectors, timeout=timeout
+            )
 
         self.modify_collection_config(
             collection_name=collection_name,
@@ -202,4 +220,3 @@ class QdrantAdmin:
         )
 
         return self.get_collection_info(collection_name=collection_name)
-

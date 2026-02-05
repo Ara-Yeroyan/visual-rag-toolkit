@@ -20,7 +20,9 @@ class CropEmptyConfig:
     uniform_rowcol_std_threshold: float = 0.0
 
 
-def crop_empty(image: Image.Image, *, config: CropEmptyConfig) -> Tuple[Image.Image, Dict[str, Any]]:
+def crop_empty(
+    image: Image.Image, *, config: CropEmptyConfig
+) -> Tuple[Image.Image, Dict[str, Any]]:
     img = image.convert("RGB")
     arr = np.array(img)
     intensity = arr.mean(axis=2)
@@ -31,7 +33,9 @@ def crop_empty(image: Image.Image, *, config: CropEmptyConfig) -> Tuple[Image.Im
             pixels = intensity[i, :] if axis == 0 else intensity[:, i]
             white = float(np.mean(pixels > config.color_threshold))
             non_white = 1.0 - white
-            if float(config.uniform_rowcol_std_threshold) > 0.0 and float(np.std(pixels)) <= float(config.uniform_rowcol_std_threshold):
+            if float(config.uniform_rowcol_std_threshold) > 0.0 and float(np.std(pixels)) <= float(
+                config.uniform_rowcol_std_threshold
+            ):
                 continue
             if (white < config.min_white_fraction) and (non_white > min_content_density_threshold):
                 return int(i)
@@ -43,7 +47,9 @@ def crop_empty(image: Image.Image, *, config: CropEmptyConfig) -> Tuple[Image.Im
             pixels = intensity[i, :] if axis == 0 else intensity[:, i]
             white = float(np.mean(pixels > config.color_threshold))
             non_white = 1.0 - white
-            if float(config.uniform_rowcol_std_threshold) > 0.0 and float(np.std(pixels)) <= float(config.uniform_rowcol_std_threshold):
+            if float(config.uniform_rowcol_std_threshold) > 0.0 and float(np.std(pixels)) <= float(
+                config.uniform_rowcol_std_threshold
+            ):
                 continue
             if (white < config.min_white_fraction) and (non_white > min_content_density_threshold):
                 return int(i + 1)
@@ -53,8 +59,12 @@ def crop_empty(image: Image.Image, *, config: CropEmptyConfig) -> Tuple[Image.Im
     left = _find_border_start(1, min_content_density_threshold=float(config.content_density_sides))
     right = _find_border_end(1, min_content_density_threshold=float(config.content_density_sides))
 
-    main_text_end = _find_border_end(0, min_content_density_threshold=float(config.content_density_main_text))
-    last_content_end = _find_border_end(0, min_content_density_threshold=float(config.content_density_any))
+    main_text_end = _find_border_end(
+        0, min_content_density_threshold=float(config.content_density_main_text)
+    )
+    last_content_end = _find_border_end(
+        0, min_content_density_threshold=float(config.content_density_any)
+    )
     bottom = main_text_end if config.remove_page_number else last_content_end
 
     width, height = img.size
@@ -108,5 +118,3 @@ def crop_empty(image: Image.Image, *, config: CropEmptyConfig) -> Tuple[Image.Im
             "uniform_rowcol_std_threshold": float(config.uniform_rowcol_std_threshold),
         },
     }
-
-

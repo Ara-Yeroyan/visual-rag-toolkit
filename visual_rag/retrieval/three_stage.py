@@ -43,7 +43,7 @@ class ThreeStageRetriever:
                 last_err = e
                 if attempt >= self.max_retries - 1:
                     break
-                time.sleep(self.retry_sleep * (2 ** attempt))
+                time.sleep(self.retry_sleep * (2**attempt))
         if last_err is not None:
             raise last_err
 
@@ -171,4 +171,3 @@ class ThreeStageRetriever:
                 }
             )
         return out
-

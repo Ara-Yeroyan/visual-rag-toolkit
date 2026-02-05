@@ -9,7 +9,8 @@ Use when:
 """
 
 import logging
-from typing import List, Dict, Any, Optional, Union
+from typing import Any, Dict, List, Union
+
 import numpy as np
 import torch
 
@@ -19,22 +20,22 @@ logger = logging.getLogger(__name__)
 class SingleStageRetriever:
     """
     Single-stage visual document retrieval using native Qdrant search.
-    
+
     Supports strategies:
     - multi_vector: Native MaxSim on full embeddings (using="initial")
     - tiles_maxsim: Native MaxSim between query tokens and tile vectors (using="mean_pooling")
     - pooled_tile: Pooled query vs tile vectors (using="mean_pooling")
     - pooled_global: Pooled query vs global pooled doc vector (using="global_pooling")
-    
+
     Args:
         qdrant_client: Connected Qdrant client
         collection_name: Name of the Qdrant collection
-    
+
     Example:
         >>> retriever = SingleStageRetriever(client, "my_collection")
         >>> results = retriever.search(query, top_k=10)
     """
-    
+
     def __init__(
         self,
         qdrant_client,
@@ -44,7 +45,7 @@ class SingleStageRetriever:
         self.client = qdrant_client
         self.collection_name = collection_name
         self.request_timeout = int(request_timeout)
-    
+
     def search(
         self,
         query_embedding: Union[torch.Tensor, np.ndarray],
@@ -54,47 +55,47 @@ class SingleStageRetriever:
     ) -> List[Dict[str, Any]]:
         """
         Single-stage search with configurable strategy.
-        
+
         Args:
             query_embedding: Query embeddings [num_tokens, dim]
             top_k: Number of results
             strategy: "multi_vector", "tiles_maxsim", "pooled_tile", or "pooled_global"
             filter_obj: Qdrant filter
-        
+
         Returns:
             List of results with scores and metadata
         """
         query_np = self._to_numpy(query_embedding)
-        
+
         if strategy == "multi_vector":
             # Native multi-vector MaxSim
             vector_name = "initial"
             query_vector = query_np.tolist()
             logger.debug(f"🎯 Multi-vector search on '{vector_name}'")
-            
+
         elif strategy == "tiles_maxsim":
             # Native multi-vector MaxSim against tile vectors
             vector_name = "mean_pooling"
             query_vector = query_np.tolist()
             logger.debug(f"🎯 Tile MaxSim search on '{vector_name}'")
-            
+
         elif strategy == "pooled_tile":
             # Tile-level pooled
             vector_name = "mean_pooling"
             query_pooled = query_np.mean(axis=0)
             query_vector = query_pooled.tolist()
             logger.debug(f"🔍 Tile-pooled search on '{vector_name}'")
-            
+
         elif strategy == "pooled_global":
             # Global pooled vector (single vector)
             vector_name = "global_pooling"
             query_pooled = query_np.mean(axis=0)
             query_vector = query_pooled.tolist()
             logger.debug(f"🔍 Global-pooled search on '{vector_name}'")
-            
+
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
-        
+
         results = self.client.query_points(
             collection_name=self.collection_name,
             query=query_vector,
@@ -105,7 +106,7 @@ class SingleStageRetriever:
             with_vectors=False,
             timeout=self.request_timeout,
         ).points
-        
+
         return [
             {
                 "id": r.id,
@@ -115,7 +116,7 @@ class SingleStageRetriever:
             }
             for r in results
         ]
-    
+
     def _to_numpy(self, embedding: Union[torch.Tensor, np.ndarray]) -> np.ndarray:
         """Convert embedding to numpy array."""
         if isinstance(embedding, torch.Tensor):
@@ -123,5 +124,3 @@ class SingleStageRetriever:
                 return embedding.cpu().float().numpy()
             return embedding.cpu().numpy()
         return np.array(embedding, dtype=np.float32)
-
-

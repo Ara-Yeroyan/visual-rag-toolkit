@@ -26,7 +26,7 @@ qdrant:
             config_path = f.name
         
         try:
-            config = load_config(config_path)
+            config = load_config(config_path, force_reload=True, apply_env_overrides=False)
             
             assert config["model"]["name"] == "test-model"
             assert config["model"]["batch_size"] == 8
@@ -50,7 +50,7 @@ model:
             config_path = f.name
         
         try:
-            config = load_config(config_path)
+            config = load_config(config_path, force_reload=True, apply_env_overrides=False)
             # The env var should be checked in get() if implemented
             # For now, just verify config loads
             assert config["model"]["name"] == "yaml-model"
@@ -93,8 +93,8 @@ qdrant:
             config_path = f.name
         
         try:
-            load_config(config_path)
-            section = get_section("qdrant")
+            load_config(config_path, force_reload=True, apply_env_overrides=False)
+            section = get_section("qdrant", apply_env_overrides=False)
             
             assert section["url"] == "http://localhost"
             assert section["collection"] == "test"

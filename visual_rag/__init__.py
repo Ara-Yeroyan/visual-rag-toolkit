@@ -14,16 +14,16 @@ Components:
 Quick Start:
 ------------
 >>> from visual_rag import VisualEmbedder, PDFProcessor, TwoStageRetriever
->>> 
+>>>
 >>> # Process PDFs
 >>> processor = PDFProcessor(dpi=140)
 >>> images, texts = processor.process_pdf("report.pdf")
->>> 
+>>>
 >>> # Generate embeddings
 >>> embedder = VisualEmbedder()
 >>> embeddings = embedder.embed_images(images)
 >>> query_emb = embedder.embed_query("What is the budget?")
->>> 
+>>>
 >>> # Search with two-stage retrieval
 >>> retriever = TwoStageRetriever(qdrant_client, "my_collection")
 >>> results = retriever.search(query_emb, top_k=10)
@@ -77,12 +77,11 @@ except ImportError:
     demo = None
 
 # Config utilities (always available)
-from visual_rag.config import load_config, get, get_section
+from visual_rag.config import get, get_section, load_config
 
 __all__ = [
     # Version
     "__version__",
-    
     # Main classes
     "VisualEmbedder",
     "PDFProcessor",
@@ -92,7 +91,6 @@ __all__ = [
     "MultiVectorRetriever",
     "QdrantAdmin",
     "demo",
-    
     # Config utilities
     "load_config",
     "get",
