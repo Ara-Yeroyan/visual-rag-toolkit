@@ -61,6 +61,16 @@ try:
 except ImportError:
     TwoStageRetriever = None
 
+try:
+    from visual_rag.retrieval.multi_vector import MultiVectorRetriever
+except ImportError:
+    MultiVectorRetriever = None
+
+try:
+    from visual_rag.qdrant_admin import QdrantAdmin
+except ImportError:
+    QdrantAdmin = None
+
 # Config utilities (always available)
 from visual_rag.config import load_config, get, get_section
 
@@ -74,6 +84,8 @@ __all__ = [
     "QdrantIndexer",
     "CloudinaryUploader",
     "TwoStageRetriever",
+    "MultiVectorRetriever",
+    "QdrantAdmin",
     
     # Config utilities
     "load_config",

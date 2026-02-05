@@ -64,11 +64,119 @@ class TwoStageRetriever:
         collection_name: str,
         full_vector_name: str = "initial",
         pooled_vector_name: str = "mean_pooling",
+        experimental_vector_name: str = "experimental_pooling",
+        global_vector_name: str = "global_pooling",
+        request_timeout: int = 120,
+        max_retries: int = 3,
+        retry_sleep: float = 0.5,
     ):
         self.client = qdrant_client
         self.collection_name = collection_name
         self.full_vector_name = full_vector_name
         self.pooled_vector_name = pooled_vector_name
+        self.experimental_vector_name = experimental_vector_name
+        self.global_vector_name = global_vector_name
+        self.request_timeout = int(request_timeout)
+        self.max_retries = int(max_retries)
+        self.retry_sleep = float(retry_sleep)
+
+    def _retry_call(self, fn):
+        import time
+
+        last_err = None
+        for attempt in range(self.max_retries):
+            try:
+                return fn()
+            except Exception as e:
+                last_err = e
+                if attempt >= self.max_retries - 1:
+                    break
+                time.sleep(self.retry_sleep * (2 ** attempt))
+        if last_err is not None:
+            raise last_err
+
+    def search_server_side(
+        self,
+        query_embedding: Union[torch.Tensor, np.ndarray],
+        top_k: int = 10,
+        prefetch_k: Optional[int] = None,
+        filter_obj=None,
+        stage1_mode: str = "pooled_query_vs_tiles",
+    ) -> List[Dict[str, Any]]:
+        """
+        Two-stage retrieval using Qdrant's native prefetch (all server-side).
+        
+        This is MUCH faster than search() because it avoids network transfer
+        of large multi-vector embeddings. All computation happens in Qdrant.
+        
+        Args:
+            query_embedding: Query embeddings [num_tokens, dim]
+            top_k: Final number of results
+            prefetch_k: Candidates for stage 1 (default: 10x top_k)
+            filter_obj: Qdrant filter
+            stage1_mode: How to do stage 1 prefetch
+        
+        Returns:
+            List of results with scores
+        """
+        from qdrant_client.http import models
+        
+        query_np = self._to_numpy(query_embedding)
+        
+        if prefetch_k is None:
+            prefetch_k = max(100, top_k * 10)
+        
+        if stage1_mode == "pooled_query_vs_tiles":
+            prefetch_query = query_np.mean(axis=0).tolist()
+            prefetch_using = self.pooled_vector_name
+        elif stage1_mode == "tokens_vs_tiles":
+            prefetch_query = query_np.tolist()
+            prefetch_using = self.pooled_vector_name
+        elif stage1_mode == "pooled_query_vs_experimental":
+            prefetch_query = query_np.mean(axis=0).tolist()
+            prefetch_using = self.experimental_vector_name
+        elif stage1_mode == "tokens_vs_experimental":
+            prefetch_query = query_np.tolist()
+            prefetch_using = self.experimental_vector_name
+        elif stage1_mode == "pooled_query_vs_global":
+            prefetch_query = query_np.mean(axis=0).tolist()
+            prefetch_using = self.global_vector_name
+        else:
+            raise ValueError(f"Unknown stage1_mode: {stage1_mode}")
+        
+        rerank_query = query_np.tolist()
+        
+        def _do_query():
+            return self.client.query_points(
+                collection_name=self.collection_name,
+                query=rerank_query,
+                using=self.full_vector_name,
+                limit=top_k,
+                query_filter=filter_obj,
+                with_payload=True,
+                search_params=models.SearchParams(exact=True),
+                prefetch=[
+                    models.Prefetch(
+                        query=prefetch_query,
+                        using=prefetch_using,
+                        limit=prefetch_k,
+                    )
+                ],
+                timeout=self.request_timeout,
+            ).points
+        
+        results = self._retry_call(_do_query)
+        
+        return [
+            {
+                "id": r.id,
+                "score_stage1": None,
+                "score_stage2": r.score,
+                "score_final": r.score,
+                "payload": r.payload,
+            }
+            for r in results
+        ]
     
     def search(
         self,
@@ -78,6 +186,7 @@ class TwoStageRetriever:
         filter_obj=None,
         use_reranking: bool = True,
         return_embeddings: bool = False,
+        stage1_mode: str = "pooled_query_vs_tiles",
     ) -> List[Dict[str, Any]]:
         """
         Two-stage retrieval: prefetch with pooling, rerank with MaxSim.
@@ -89,6 +198,10 @@ class TwoStageRetriever:
             filter_obj: Qdrant filter for metadata filtering
             use_reranking: Enable stage 2 reranking (default: True)
             return_embeddings: Include embeddings in results
+            stage1_mode:
+                - "pooled_query_vs_tiles": pool query to 1×dim and search tile vectors (using="mean_pooling")
+                - "tokens_vs_tiles": search tile vectors with full query tokens (using="mean_pooling")
+                - "pooled_query_vs_global": pool query to 1×dim and search global pooled doc vectors (using="global_pooling")
         
         Returns:
             List of results with scores and metadata:
@@ -111,11 +224,12 @@ class TwoStageRetriever:
             prefetch_k = max(100, top_k * 10)
         
         # Stage 1: Prefetch with pooled vectors
-        logger.info(f"🔍 Stage 1: Prefetching {prefetch_k} candidates with pooled search")
+        logger.info(f"🔍 Stage 1: Prefetching {prefetch_k} candidates ({stage1_mode})")
         candidates = self._stage1_prefetch(
             query_np=query_np,
             top_k=prefetch_k,
             filter_obj=filter_obj,
+            stage1_mode=stage1_mode,
         )
         
         if not candidates:
@@ -202,21 +316,34 @@ class TwoStageRetriever:
         query_np: np.ndarray,
         top_k: int,
         filter_obj=None,
+        stage1_mode: str = "pooled_query_vs_tiles",
     ) -> List[Dict[str, Any]]:
-        """Stage 1: Fast prefetch with pooled vectors."""
-        # Pool query to single vector
-        query_pooled = query_np.mean(axis=0).tolist()
+        """Stage 1: Prefetch candidates."""
+        if stage1_mode == "pooled_query_vs_tiles":
+            query_vector = query_np.mean(axis=0).tolist()
+            vector_name = self.pooled_vector_name
+        elif stage1_mode == "tokens_vs_tiles":
+            query_vector = query_np.tolist()
+            vector_name = self.pooled_vector_name
+        elif stage1_mode == "pooled_query_vs_global":
+            query_vector = query_np.mean(axis=0).tolist()
+            vector_name = self.global_vector_name
+        else:
+            raise ValueError(f"Unknown stage1_mode: {stage1_mode}")
         
-        results = self.client.query_points(
-            collection_name=self.collection_name,
-            query=query_pooled,
-            using=self.pooled_vector_name,
-            query_filter=filter_obj,
-            limit=top_k,
-            with_payload=True,
-            with_vectors=False,  # Don't fetch vectors yet
-            timeout=60,
-        ).points
+        def _do_query():
+            return self.client.query_points(
+                collection_name=self.collection_name,
+                query=query_vector,
+                using=vector_name,
+                query_filter=filter_obj,
+                limit=top_k,
+                with_payload=True,
+                with_vectors=False,
+                timeout=self.request_timeout,
+            ).points
+
+        results = self._retry_call(_do_query)
         
         return [
             {
@@ -241,12 +368,16 @@ class TwoStageRetriever:
         candidate_ids = [c["id"] for c in candidates]
         
         # Retrieve points with vectors
-        points = self.client.retrieve(
-            collection_name=self.collection_name,
-            ids=candidate_ids,
-            with_payload=False,
-            with_vectors=[self.full_vector_name],
-        )
+        def _do_retrieve():
+            return self.client.retrieve(
+                collection_name=self.collection_name,
+                ids=candidate_ids,
+                with_payload=False,
+                with_vectors=[self.full_vector_name],
+                timeout=self.request_timeout,
+            )
+
+        points = self._retry_call(_do_retrieve)
         
         # Build ID to embedding map
         id_to_embedding = {}

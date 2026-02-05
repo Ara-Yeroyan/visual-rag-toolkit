@@ -8,6 +8,10 @@ Features:
 - Retry logic with timeouts
 - Batch uploading
 - Automatic JPEG optimization
+
+Environment Variables:
+- VISUAL_RAG_THREAD_SAFE: Set to "1" to use thread-safe timeouts
+  (required for Streamlit, Flask, or other threaded contexts)
 """
 
 import io
@@ -16,11 +20,15 @@ import time
 import signal
 import logging
 import platform
+import threading
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+THREAD_SAFE_MODE = os.getenv("VISUAL_RAG_THREAD_SAFE", "").lower() in ("1", "true", "yes")
 
 
 class CloudinaryUploader:
@@ -124,40 +132,74 @@ class CloudinaryUploader:
         if subfolder:
             folder_path = f"{self.folder}/{subfolder}"
         
-        # Timeout handling (Unix/macOS only)
+        def do_upload():
+            buffer.seek(0)
+            result = cloudinary.uploader.upload(
+                buffer,
+                folder=folder_path,
+                overwrite=True,
+                public_id=public_id,
+                resource_type="image",
+                timeout=self.timeout_seconds,
+            )
+            return result["secure_url"]
+        
+        # Use thread-safe mode for Streamlit/Flask/threaded contexts
+        # Set VISUAL_RAG_THREAD_SAFE=1 to enable
+        if THREAD_SAFE_MODE or threading.current_thread() is not threading.main_thread():
+            return self._upload_with_thread_timeout(do_upload, public_id)
+        else:
+            return self._upload_with_signal_timeout(do_upload, public_id)
+    
+    def _upload_with_thread_timeout(self, do_upload, public_id: str) -> Optional[str]:
+        """Thread-safe upload with ThreadPoolExecutor timeout."""
+        for attempt in range(self.max_retries):
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(do_upload)
+                    return future.result(timeout=self.timeout_seconds)
+                        
+            except FuturesTimeoutError:
+                logger.warning(
+                    f"Upload timeout (attempt {attempt + 1}/{self.max_retries}): {public_id}"
+                )
+                if attempt < self.max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    
+            except Exception as e:
+                logger.warning(
+                    f"Upload failed (attempt {attempt + 1}/{self.max_retries}): {e}"
+                )
+                if attempt < self.max_retries - 1:
+                    time.sleep(2 ** attempt)
+        
+        logger.error(f"❌ Upload failed after {self.max_retries} attempts: {public_id}")
+        return None
+    
+    def _upload_with_signal_timeout(self, do_upload, public_id: str) -> Optional[str]:
+        """Signal-based upload timeout (main thread only, Unix/macOS)."""
         use_timeout = platform.system() != "Windows"
         
-        class TimeoutError(Exception):
+        class SignalTimeoutError(Exception):
             pass
         
         def timeout_handler(signum, frame):
-            raise TimeoutError(f"Upload timed out after {self.timeout_seconds}s")
+            raise SignalTimeoutError(f"Upload timed out after {self.timeout_seconds}s")
         
         for attempt in range(self.max_retries):
             try:
-                buffer.seek(0)
-                
-                # Set timeout alarm
                 if use_timeout:
                     old_handler = signal.signal(signal.SIGALRM, timeout_handler)
                     signal.alarm(self.timeout_seconds)
                 
                 try:
-                    result = cloudinary.uploader.upload(
-                        buffer,
-                        folder=folder_path,
-                        overwrite=True,
-                        public_id=public_id,
-                        resource_type="image",
-                        timeout=self.timeout_seconds,
-                    )
-                    return result["secure_url"]
+                    return do_upload()
                 finally:
                     if use_timeout:
                         signal.alarm(0)
                         signal.signal(signal.SIGALRM, old_handler)
                         
-            except TimeoutError:
+            except SignalTimeoutError:
                 logger.warning(
                     f"Upload timeout (attempt {attempt + 1}/{self.max_retries}): {public_id}"
                 )
@@ -204,5 +246,34 @@ class CloudinaryUploader:
         )
         
         return original_url, resized_url
+
+    def upload_original_cropped_and_resized(
+        self,
+        original_image: Image.Image,
+        cropped_image: Optional[Image.Image],
+        resized_image: Image.Image,
+        base_public_id: str,
+    ) -> tuple:
+        original_url = self.upload(
+            original_image,
+            base_public_id,
+            subfolder="original",
+        )
+
+        cropped_url = None
+        if cropped_image is not None:
+            cropped_url = self.upload(
+                cropped_image,
+                base_public_id,
+                subfolder="cropped",
+            )
+
+        resized_url = self.upload(
+            resized_image,
+            base_public_id,
+            subfolder="resized",
+        )
+
+        return original_url, cropped_url, resized_url
 
 

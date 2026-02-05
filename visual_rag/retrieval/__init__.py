@@ -7,7 +7,13 @@ Components:
 """
 
 from visual_rag.retrieval.two_stage import TwoStageRetriever
+from visual_rag.retrieval.single_stage import SingleStageRetriever
+from visual_rag.retrieval.multi_vector import MultiVectorRetriever
+from visual_rag.retrieval.three_stage import ThreeStageRetriever
 
 __all__ = [
     "TwoStageRetriever",
+    "SingleStageRetriever",
+    "MultiVectorRetriever",
+    "ThreeStageRetriever",
 ]

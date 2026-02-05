@@ -15,6 +15,7 @@ import time
 import hashlib
 import logging
 from typing import List, Dict, Any, Optional, Set
+from urllib.parse import urlparse
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,7 @@ class QdrantIndexer:
         collection_name: str,
         timeout: int = 60,
         prefer_grpc: bool = False,
+        vector_datatype: str = "float32",
     ):
         try:
             from qdrant_client import QdrantClient
@@ -65,17 +67,45 @@ class QdrantIndexer:
         
         self.collection_name = collection_name
         self.timeout = timeout
+        if vector_datatype not in ("float32", "float16"):
+            raise ValueError("vector_datatype must be 'float32' or 'float16'")
+        self.vector_datatype = vector_datatype
+        self._np_vector_dtype = np.float16 if vector_datatype == "float16" else np.float32
+
+        grpc_port = None
+        if prefer_grpc:
+            try:
+                parsed = urlparse(url)
+                port = parsed.port
+                if port == 6333:
+                    grpc_port = 6334
+            except Exception:
+                grpc_port = None
         
-        self.client = QdrantClient(
-            url=url,
-            api_key=api_key,
-            timeout=timeout,
-            prefer_grpc=prefer_grpc,
-            check_compatibility=False,
-        )
+        def _make_client(use_grpc: bool):
+            return QdrantClient(
+                url=url,
+                api_key=api_key,
+                timeout=timeout,
+                prefer_grpc=bool(use_grpc),
+                grpc_port=grpc_port,
+                check_compatibility=False,
+            )
+
+        self.client = _make_client(prefer_grpc)
+        if prefer_grpc:
+            try:
+                _ = self.client.get_collections()
+            except Exception as e:
+                msg = str(e)
+                if "StatusCode.PERMISSION_DENIED" in msg or "http2 header with status: 403" in msg:
+                    self.client = _make_client(False)
+                else:
+                    raise
         
         logger.info(f"🔌 Connected to Qdrant: {url}")
         logger.info(f"   Collection: {collection_name}")
+        logger.info(f"   Vector datatype: {self.vector_datatype}")
     
     def collection_exists(self) -> bool:
         """Check if collection exists."""
@@ -87,31 +117,29 @@ class QdrantIndexer:
         embedding_dim: int = 128,
         force_recreate: bool = False,
         enable_quantization: bool = False,
+        indexing_threshold: int = 20000,
+        full_scan_threshold: int = 0,
     ) -> bool:
         """
         Create collection with multi-vector support.
         
-        Creates two named vectors:
+        Creates named vectors:
         - initial: Full multi-vector embeddings (num_patches × dim)
         - mean_pooling: Tile-level pooled vectors (num_tiles × dim)
+        - experimental_pooling: Experimental multi-vector pooling (varies by model)
+        - global_pooling: Single vector pooled representation (dim)
         
         Args:
             embedding_dim: Embedding dimension (128 for ColSmol)
             force_recreate: Delete and recreate if exists
             enable_quantization: Enable int8 quantization
+            indexing_threshold: Qdrant optimizer indexing threshold (set 0 to always build ANN indexes)
         
         Returns:
             True if created, False if already existed
         """
         from qdrant_client.http import models
-        from qdrant_client.http.models import (
-            Distance,
-            VectorParams,
-            OptimizersConfigDiff,
-            HnswConfigDiff,
-            ScalarQuantizationConfig,
-            ScalarType,
-        )
+        from qdrant_client.http.models import Distance, VectorParams
         
         if self.collection_exists():
             if force_recreate:
@@ -128,54 +156,41 @@ class QdrantIndexer:
             comparator=models.MultiVectorComparator.MAX_SIM
         )
         
-        # HNSW config for pooled vectors
-        hnsw_config = HnswConfigDiff(
-            m=32,
-            ef_construct=100,
-            full_scan_threshold=10000,
-            on_disk=True,
-        )
-        
-        # Optional quantization
-        quantization_config = None
-        if enable_quantization:
-            logger.info("   Quantization: ENABLED (int8)")
-            quantization_config = ScalarQuantizationConfig(
-                type=ScalarType.INT8,
-                quantile=0.99,
-                always_ram=True,
-            )
-        
-        # Vector configs
+        # Vector configs - simplified for compatibility
+        datatype = models.Datatype.FLOAT16 if self.vector_datatype == "float16" else models.Datatype.FLOAT32
         vectors_config = {
             "initial": VectorParams(
                 size=embedding_dim,
                 distance=Distance.COSINE,
                 on_disk=True,
                 multivector_config=multivector_config,
-                quantization_config=quantization_config,
+                datatype=datatype,
             ),
             "mean_pooling": VectorParams(
                 size=embedding_dim,
                 distance=Distance.COSINE,
-                on_disk=False,  # Keep in RAM for fast prefetch
+                on_disk=False,
                 multivector_config=multivector_config,
-                hnsw_config=hnsw_config,
-                quantization_config=quantization_config,
+                datatype=datatype,
+            ),
+            "experimental_pooling": VectorParams(
+                size=embedding_dim,
+                distance=Distance.COSINE,
+                on_disk=False,
+                multivector_config=multivector_config,
+                datatype=datatype,
+            ),
+            "global_pooling": VectorParams(
+                size=embedding_dim,
+                distance=Distance.COSINE,
+                on_disk=False,
+                datatype=datatype,
             ),
         }
-        
-        # Optimizer config for low-RAM clusters
-        optimizer_config = OptimizersConfigDiff(
-            indexing_threshold=20000,  # High threshold to avoid indexing (saves RAM)
-            memmap_threshold=0,  # Use mmap immediately
-            flush_interval_sec=5,  # Flush WAL frequently
-        )
         
         self.client.create_collection(
             collection_name=self.collection_name,
             vectors_config=vectors_config,
-            optimizers_config=optimizer_config,
         )
         
         logger.info(f"✅ Collection created: {self.collection_name}")
@@ -202,16 +217,8 @@ class QdrantIndexer:
             "text": models.PayloadSchemaType.TEXT,
         }
         
-        # Default fields
-        if fields is None:
-            fields = [
-                {"field": "filename", "type": "keyword"},
-                {"field": "page_number", "type": "integer"},
-                {"field": "year", "type": "integer"},
-                {"field": "source", "type": "keyword"},
-                {"field": "district", "type": "keyword"},
-                {"field": "has_text", "type": "bool"},
-            ]
+        if not fields:
+            return
         
         logger.info("📇 Creating payload indexes...")
         
@@ -235,6 +242,8 @@ class QdrantIndexer:
         points: List[Dict[str, Any]],
         max_retries: int = 3,
         delay_between_batches: float = 0.5,
+        wait: bool = True,
+        stop_event=None,
     ) -> int:
         """
         Upload a batch of points to Qdrant.
@@ -243,12 +252,16 @@ class QdrantIndexer:
         - id: Unique point ID (string or UUID)
         - visual_embedding: Full embedding [num_patches, dim]
         - tile_pooled_embedding: Pooled embedding [num_tiles, dim]
+        - experimental_pooled_embedding: Experimental pooled embedding [*, dim]
+        - global_pooled_embedding: Pooled embedding [dim]
         - metadata: Payload dict
         
         Args:
             points: List of point dicts
             max_retries: Retry attempts on failure
             delay_between_batches: Delay after upload
+            wait: Wait for operation to complete on Qdrant server
+            stop_event: Optional threading.Event used to cancel uploads early
         
         Returns:
             Number of successfully uploaded points
@@ -257,39 +270,115 @@ class QdrantIndexer:
         
         if not points:
             return 0
+
+        def _is_cancelled() -> bool:
+            return stop_event is not None and getattr(stop_event, "is_set", lambda: False)()
         
-        # Build Qdrant points
-        qdrant_points = []
-        for point_data in points:
-            point = models.PointStruct(
-                id=point_data["id"],
-                vector={
-                    "initial": point_data["visual_embedding"].tolist(),
-                    "mean_pooling": point_data["tile_pooled_embedding"].tolist(),
-                },
-                payload=point_data["metadata"],
-            )
-            qdrant_points.append(point)
+        def _is_payload_too_large_error(e: Exception) -> bool:
+            msg = str(e)
+            if ("JSON payload" in msg and "larger than allowed" in msg) or ("Payload error:" in msg and "limit:" in msg):
+                return True
+            content = getattr(e, "content", None)
+            if content is not None:
+                try:
+                    if isinstance(content, (bytes, bytearray)):
+                        text = content.decode("utf-8", errors="ignore")
+                    else:
+                        text = str(content)
+                except Exception:
+                    text = ""
+                if ("JSON payload" in text and "larger than allowed" in text) or ("Payload error" in text and "limit" in text):
+                    return True
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                try:
+                    text = str(getattr(resp, "text", "") or "")
+                except Exception:
+                    text = ""
+                if ("JSON payload" in text and "larger than allowed" in text) or ("Payload error" in text and "limit" in text):
+                    return True
+            return False
+
+        def _to_list(val):
+            if isinstance(val, np.ndarray):
+                return val.tolist()
+            return val
+
+        def _build_qdrant_points(batch_points: List[Dict[str, Any]]) -> List[models.PointStruct]:
+            qdrant_points: List[models.PointStruct] = []
+            for p in batch_points:
+                global_pooled = p.get("global_pooled_embedding")
+                if global_pooled is None:
+                    tile_pooled = np.array(p["tile_pooled_embedding"], dtype=np.float32)
+                    global_pooled = tile_pooled.mean(axis=0)
+                global_pooled = np.array(global_pooled, dtype=np.float32).reshape(-1)
+
+                initial = np.array(p["visual_embedding"], dtype=np.float32).astype(self._np_vector_dtype, copy=False)
+                mean_pooling = np.array(p["tile_pooled_embedding"], dtype=np.float32).astype(self._np_vector_dtype, copy=False)
+                experimental_pooling = np.array(p["experimental_pooled_embedding"], dtype=np.float32).astype(
+                    self._np_vector_dtype, copy=False
+                )
+                global_pooling = global_pooled.astype(self._np_vector_dtype, copy=False)
+
+                qdrant_points.append(
+                    models.PointStruct(
+                        id=p["id"],
+                        vector={
+                            "initial": _to_list(initial),
+                            "mean_pooling": _to_list(mean_pooling),
+                            "experimental_pooling": _to_list(experimental_pooling),
+                            "global_pooling": _to_list(global_pooling),
+                        },
+                        payload=p["metadata"],
+                    )
+                )
+            return qdrant_points
         
         # Upload with retry
         for attempt in range(max_retries):
             try:
+                if _is_cancelled():
+                    return 0
+                qdrant_points = _build_qdrant_points(points)
                 self.client.upsert(
                     collection_name=self.collection_name,
                     points=qdrant_points,
-                    wait=True,
+                    wait=wait,
                 )
-                
+
                 if delay_between_batches > 0:
+                    if _is_cancelled():
+                        return 0
                     time.sleep(delay_between_batches)
-                
-                return len(qdrant_points)
-                
+
+                return len(points)
+
             except Exception as e:
-                logger.warning(
-                    f"Upload attempt {attempt + 1}/{max_retries} failed: {e}"
-                )
+                if _is_payload_too_large_error(e) and len(points) > 1:
+                    mid = len(points) // 2
+                    left = points[:mid]
+                    right = points[mid:]
+                    logger.warning(
+                        f"Upload payload too large for {len(points)} points; splitting into {len(left)} + {len(right)}"
+                    )
+                    return self.upload_batch(
+                        left,
+                        max_retries=max_retries,
+                        delay_between_batches=delay_between_batches,
+                        wait=wait,
+                        stop_event=stop_event,
+                    ) + self.upload_batch(
+                        right,
+                        max_retries=max_retries,
+                        delay_between_batches=delay_between_batches,
+                        wait=wait,
+                        stop_event=stop_event,
+                    )
+
+                logger.warning(f"Upload attempt {attempt + 1}/{max_retries} failed: {e}")
                 if attempt < max_retries - 1:
+                    if _is_cancelled():
+                        return 0
                     time.sleep(2 ** attempt)  # Exponential backoff
         
         logger.error(f"❌ Upload failed after {max_retries} attempts")

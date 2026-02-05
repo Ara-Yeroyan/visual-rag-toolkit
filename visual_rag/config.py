@@ -18,6 +18,19 @@ logger = logging.getLogger(__name__)
 _config_cache: Optional[Dict[str, Any]] = None
 
 
+def _env_qdrant_url() -> Optional[str]:
+    return os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL")
+
+
+def _env_qdrant_api_key() -> Optional[str]:
+    return (
+        os.getenv("SIGIR_QDRANT_KEY")
+        or os.getenv("SIGIR_QDRANT_API_KEY")
+        or os.getenv("DEST_QDRANT_API_KEY")
+        or os.getenv("QDRANT_API_KEY")
+    )
+
+
 def load_config(
     config_path: Optional[str] = None,
     force_reload: bool = False,
@@ -171,8 +184,8 @@ def get_section(section: str) -> Dict[str, Any]:
 def get_qdrant_config() -> Dict[str, Any]:
     """Get Qdrant configuration with defaults."""
     return {
-        "url": get("qdrant.url", os.getenv("QDRANT_URL")),
-        "api_key": get("qdrant.api_key", os.getenv("QDRANT_API_KEY")),
+        "url": get("qdrant.url", _env_qdrant_url()),
+        "api_key": get("qdrant.api_key", _env_qdrant_api_key()),
         "collection": get("qdrant.collection", "visual_documents"),
     }
 

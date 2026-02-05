@@ -24,6 +24,7 @@ import argparse
 import logging
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -94,13 +95,31 @@ def cmd_process(args):
     model_name = args.model or config.get("model", {}).get("name", "vidore/colSmol-500M")
     collection_name = args.collection or config.get("qdrant", {}).get("collection_name", "visual_documents")
     
-    # Initialize embedder
+    torch_dtype = None
+    if args.torch_dtype != "auto":
+        import torch
+        torch_dtype = {
+            "float32": torch.float32,
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+        }[args.torch_dtype]
+
     logger.info(f"🤖 Initializing embedder: {model_name}")
-    embedder = VisualEmbedder(model_name=model_name, batch_size=args.batch_size)
+    embedder = VisualEmbedder(
+        model_name=model_name,
+        batch_size=args.batch_size,
+        torch_dtype=torch_dtype,
+        processor_speed=str(getattr(args, "processor_speed", "fast")),
+    )
     
     # Initialize Qdrant indexer
-    qdrant_url = os.getenv("QDRANT_URL")
-    qdrant_api_key = os.getenv("QDRANT_API_KEY")
+    qdrant_url = os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL")
+    qdrant_api_key = (
+        os.getenv("SIGIR_QDRANT_KEY")
+        or os.getenv("SIGIR_QDRANT_API_KEY")
+        or os.getenv("DEST_QDRANT_API_KEY")
+        or os.getenv("QDRANT_API_KEY")
+    )
     
     if not qdrant_url:
         logger.error("❌ QDRANT_URL environment variable not set")
@@ -111,11 +130,42 @@ def cmd_process(args):
         url=qdrant_url,
         api_key=qdrant_api_key,
         collection_name=collection_name,
+        prefer_grpc=args.prefer_grpc,
+        vector_datatype=args.qdrant_vector_dtype,
     )
     
     # Create collection if needed
     indexer.create_collection(force_recreate=args.force_recreate)
-    indexer.create_payload_indexes()
+    inferred_fields = []
+    inferred_fields.append({"field": "filename", "type": "keyword"})
+    inferred_fields.append({"field": "page_number", "type": "integer"})
+    inferred_fields.append({"field": "has_text", "type": "bool"})
+
+    if metadata_mapping:
+        keys = set()
+        for _, meta in metadata_mapping.items():
+            if isinstance(meta, dict):
+                keys.update(meta.keys())
+        for k in sorted(keys):
+            if k in ("filename", "page_number", "has_text"):
+                continue
+            inferred_type = "keyword"
+            for _, meta in metadata_mapping.items():
+                if not isinstance(meta, dict):
+                    continue
+                v = meta.get(k)
+                if isinstance(v, bool):
+                    inferred_type = "bool"
+                    break
+                if isinstance(v, int):
+                    inferred_type = "integer"
+                    break
+                if isinstance(v, float):
+                    inferred_type = "float"
+                    break
+            inferred_fields.append({"field": k, "type": inferred_type})
+
+    indexer.create_payload_indexes(fields=inferred_fields)
     
     # Initialize Cloudinary uploader (optional)
     cloudinary_uploader = None
@@ -135,6 +185,9 @@ def cmd_process(args):
         metadata_mapping=metadata_mapping,
         config=config,
         embedding_strategy=args.strategy,
+        crop_empty=bool(getattr(args, "crop_empty", False)),
+        crop_empty_percentage_to_remove=float(getattr(args, "crop_empty_percentage_to_remove", 0.9)),
+        crop_empty_remove_page_number=bool(getattr(args, "crop_empty_remove_page_number", False)),
     )
     
     # Process PDFs
@@ -177,13 +230,18 @@ def cmd_process(args):
 def cmd_search(args):
     """Search documents."""
     from visual_rag import VisualEmbedder
-    from visual_rag.retrieval import TwoStageRetriever
+    from visual_rag.retrieval import TwoStageRetriever, SingleStageRetriever
     from qdrant_client import QdrantClient
     
     load_dotenv()
     
-    qdrant_url = os.getenv("QDRANT_URL")
-    qdrant_api_key = os.getenv("QDRANT_API_KEY")
+    qdrant_url = os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL")
+    qdrant_api_key = (
+        os.getenv("SIGIR_QDRANT_KEY")
+        or os.getenv("SIGIR_QDRANT_API_KEY")
+        or os.getenv("DEST_QDRANT_API_KEY")
+        or os.getenv("QDRANT_API_KEY")
+    )
     
     if not qdrant_url:
         logger.error("❌ QDRANT_URL not set")
@@ -191,11 +249,19 @@ def cmd_search(args):
     
     # Initialize
     logger.info(f"🤖 Loading model: {args.model}")
-    embedder = VisualEmbedder(model_name=args.model)
-    
+    embedder = VisualEmbedder(model_name=args.model, processor_speed=str(getattr(args, "processor_speed", "fast")))
+
     logger.info(f"🔌 Connecting to Qdrant")
-    client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
-    retriever = TwoStageRetriever(client, args.collection)
+    grpc_port = 6334 if args.prefer_grpc and urlparse(qdrant_url).port == 6333 else None
+    client = QdrantClient(
+        url=qdrant_url,
+        api_key=qdrant_api_key,
+        prefer_grpc=args.prefer_grpc,
+        grpc_port=grpc_port,
+        check_compatibility=False,
+    )
+    two_stage = TwoStageRetriever(client, args.collection)
+    single_stage = SingleStageRetriever(client, args.collection)
     
     # Embed query
     logger.info(f"🔍 Query: {args.query}")
@@ -204,19 +270,43 @@ def cmd_search(args):
     # Build filter
     filter_obj = None
     if args.year or args.source or args.district:
-        filter_obj = retriever.build_filter(
+        filter_obj = two_stage.build_filter(
             year=args.year,
             source=args.source,
             district=args.district,
         )
     
     # Search
-    results = retriever.search(
-        query_embedding=query_embedding.numpy(),
-        top_k=args.top_k,
-        prefetch_k=args.prefetch_k,
-        filter_obj=filter_obj,
-    )
+    query_np = query_embedding.detach().cpu().numpy()
+    if args.strategy == "single_full":
+        results = single_stage.search(
+            query_embedding=query_np,
+            top_k=args.top_k,
+            strategy="multi_vector",
+            filter_obj=filter_obj,
+        )
+    elif args.strategy == "single_tiles":
+        results = single_stage.search(
+            query_embedding=query_np,
+            top_k=args.top_k,
+            strategy="tiles_maxsim",
+            filter_obj=filter_obj,
+        )
+    elif args.strategy == "single_global":
+        results = single_stage.search(
+            query_embedding=query_np,
+            top_k=args.top_k,
+            strategy="pooled_global",
+            filter_obj=filter_obj,
+        )
+    else:
+        results = two_stage.search(
+            query_embedding=query_np,
+            top_k=args.top_k,
+            prefetch_k=args.prefetch_k,
+            filter_obj=filter_obj,
+            stage1_mode=args.stage1_mode,
+        )
     
     # Display results
     logger.info(f"\n📊 Results ({len(results)}):")
@@ -245,14 +335,26 @@ def cmd_info(args):
     
     load_dotenv()
     
-    qdrant_url = os.getenv("QDRANT_URL")
-    qdrant_api_key = os.getenv("QDRANT_API_KEY")
+    qdrant_url = os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL")
+    qdrant_api_key = (
+        os.getenv("SIGIR_QDRANT_KEY")
+        or os.getenv("SIGIR_QDRANT_API_KEY")
+        or os.getenv("DEST_QDRANT_API_KEY")
+        or os.getenv("QDRANT_API_KEY")
+    )
     
     if not qdrant_url:
         logger.error("❌ QDRANT_URL not set")
         sys.exit(1)
     
-    client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
+    grpc_port = 6334 if args.prefer_grpc and urlparse(qdrant_url).port == 6333 else None
+    client = QdrantClient(
+        url=qdrant_url,
+        api_key=qdrant_api_key,
+        prefer_grpc=args.prefer_grpc,
+        grpc_port=grpc_port,
+        check_compatibility=False,
+    )
     
     try:
         info = client.get_collection(args.collection)
@@ -346,6 +448,22 @@ Examples:
         help="Skip Cloudinary uploads"
     )
     process_parser.add_argument(
+        "--crop-empty",
+        action="store_true",
+        help="Crop empty whitespace from page images before embedding (default: off).",
+    )
+    process_parser.add_argument(
+        "--crop-empty-percentage-to-remove",
+        type=float,
+        default=0.9,
+        help="Kept for traceability; currently does not affect cropping behavior (default: 0.9).",
+    )
+    process_parser.add_argument(
+        "--crop-empty-remove-page-number",
+        action="store_true",
+        help="If set, attempts to crop away the bottom region that contains sparse page numbers (default: off).",
+    )
+    process_parser.add_argument(
         "--no-skip-existing", action="store_true",
         help="Process all pages even if they exist in Qdrant"
     )
@@ -362,6 +480,41 @@ Examples:
         choices=["pooling", "standard", "all"],
         help="Embedding strategy: 'pooling' (NOVEL), 'standard' (BASELINE), "
              "'all' (embed once, store BOTH for comparison)"
+    )
+    process_parser.add_argument(
+        "--torch-dtype",
+        type=str,
+        default="auto",
+        choices=["auto", "float32", "float16", "bfloat16"],
+        help="Torch dtype for model weights (default: auto; CUDA->bfloat16, else float32).",
+    )
+    process_parser.add_argument(
+        "--qdrant-vector-dtype",
+        type=str,
+        default="float16",
+        choices=["float16", "float32"],
+        help="Datatype for vectors stored in Qdrant (default: float16).",
+    )
+    process_parser.add_argument(
+        "--processor-speed",
+        type=str,
+        default="fast",
+        choices=["fast", "slow", "auto"],
+        help="Processor implementation: fast (default, with fallback to slow), slow, or auto.",
+    )
+    process_grpc_group = process_parser.add_mutually_exclusive_group()
+    process_grpc_group.add_argument(
+        "--prefer-grpc",
+        dest="prefer_grpc",
+        action="store_true",
+        default=True,
+        help="Use gRPC for Qdrant client (recommended).",
+    )
+    process_grpc_group.add_argument(
+        "--no-prefer-grpc",
+        dest="prefer_grpc",
+        action="store_false",
+        help="Disable gRPC for Qdrant client.",
     )
     process_parser.set_defaults(func=cmd_process)
     
@@ -385,12 +538,29 @@ Examples:
         help="Model name"
     )
     search_parser.add_argument(
+        "--processor-speed",
+        type=str,
+        default="fast",
+        choices=["fast", "slow", "auto"],
+        help="Processor implementation: fast (default, with fallback to slow), slow, or auto.",
+    )
+    search_parser.add_argument(
         "--top-k", type=int, default=10,
         help="Number of results"
     )
     search_parser.add_argument(
+        "--strategy", type=str, default="single_full",
+        choices=["single_full", "single_tiles", "single_global", "two_stage"],
+        help="Search strategy"
+    )
+    search_parser.add_argument(
         "--prefetch-k", type=int, default=200,
         help="Prefetch candidates for two-stage retrieval"
+    )
+    search_parser.add_argument(
+        "--stage1-mode", type=str, default="pooled_query_vs_tiles",
+        choices=["pooled_query_vs_tiles", "tokens_vs_tiles", "pooled_query_vs_global"],
+        help="Stage 1 mode for two-stage retrieval"
     )
     search_parser.add_argument(
         "--year", type=int,
@@ -408,6 +578,20 @@ Examples:
         "--show-text", action="store_true",
         help="Show text snippets in results"
     )
+    search_grpc_group = search_parser.add_mutually_exclusive_group()
+    search_grpc_group.add_argument(
+        "--prefer-grpc",
+        dest="prefer_grpc",
+        action="store_true",
+        default=True,
+        help="Use gRPC for Qdrant client (recommended).",
+    )
+    search_grpc_group.add_argument(
+        "--no-prefer-grpc",
+        dest="prefer_grpc",
+        action="store_false",
+        help="Disable gRPC for Qdrant client.",
+    )
     search_parser.set_defaults(func=cmd_search)
     
     # =========================================================================
@@ -420,6 +604,20 @@ Examples:
     info_parser.add_argument(
         "--collection", type=str, default="visual_documents",
         help="Qdrant collection name"
+    )
+    info_grpc_group = info_parser.add_mutually_exclusive_group()
+    info_grpc_group.add_argument(
+        "--prefer-grpc",
+        dest="prefer_grpc",
+        action="store_true",
+        default=True,
+        help="Use gRPC for Qdrant client (recommended).",
+    )
+    info_grpc_group.add_argument(
+        "--no-prefer-grpc",
+        dest="prefer_grpc",
+        action="store_false",
+        help="Disable gRPC for Qdrant client.",
     )
     info_parser.set_defaults(func=cmd_info)
     

@@ -20,10 +20,11 @@ class SingleStageRetriever:
     """
     Single-stage visual document retrieval using native Qdrant search.
     
-    Supports three strategies:
-    1. multi_vector (SOTA): Native MaxSim on full embeddings
-    2. pooled_tile: Search on tile-level pooled vectors
-    3. pooled_global: Search on globally pooled vectors
+    Supports strategies:
+    - multi_vector: Native MaxSim on full embeddings (using="initial")
+    - tiles_maxsim: Native MaxSim between query tokens and tile vectors (using="mean_pooling")
+    - pooled_tile: Pooled query vs tile vectors (using="mean_pooling")
+    - pooled_global: Pooled query vs global pooled doc vector (using="global_pooling")
     
     Args:
         qdrant_client: Connected Qdrant client
@@ -38,9 +39,11 @@ class SingleStageRetriever:
         self,
         qdrant_client,
         collection_name: str,
+        request_timeout: int = 120,
     ):
         self.client = qdrant_client
         self.collection_name = collection_name
+        self.request_timeout = int(request_timeout)
     
     def search(
         self,
@@ -55,7 +58,7 @@ class SingleStageRetriever:
         Args:
             query_embedding: Query embeddings [num_tokens, dim]
             top_k: Number of results
-            strategy: "multi_vector", "pooled_tile", or "pooled_global"
+            strategy: "multi_vector", "tiles_maxsim", "pooled_tile", or "pooled_global"
             filter_obj: Qdrant filter
         
         Returns:
@@ -67,21 +70,27 @@ class SingleStageRetriever:
             # Native multi-vector MaxSim
             vector_name = "initial"
             query_vector = query_np.tolist()
-            logger.info(f"🎯 Multi-vector search on '{vector_name}'")
+            logger.debug(f"🎯 Multi-vector search on '{vector_name}'")
+            
+        elif strategy == "tiles_maxsim":
+            # Native multi-vector MaxSim against tile vectors
+            vector_name = "mean_pooling"
+            query_vector = query_np.tolist()
+            logger.debug(f"🎯 Tile MaxSim search on '{vector_name}'")
             
         elif strategy == "pooled_tile":
             # Tile-level pooled
             vector_name = "mean_pooling"
             query_pooled = query_np.mean(axis=0)
             query_vector = query_pooled.tolist()
-            logger.info(f"🔍 Tile-pooled search on '{vector_name}'")
+            logger.debug(f"🔍 Tile-pooled search on '{vector_name}'")
             
         elif strategy == "pooled_global":
-            # Global mean pooling (single vector)
-            vector_name = "mean_pooling"
+            # Global pooled vector (single vector)
+            vector_name = "global_pooling"
             query_pooled = query_np.mean(axis=0)
             query_vector = query_pooled.tolist()
-            logger.info(f"🔍 Global-pooled search on '{vector_name}'")
+            logger.debug(f"🔍 Global-pooled search on '{vector_name}'")
             
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
@@ -94,7 +103,7 @@ class SingleStageRetriever:
             limit=top_k,
             with_payload=True,
             with_vectors=False,
-            timeout=120,
+            timeout=self.request_timeout,
         ).points
         
         return [

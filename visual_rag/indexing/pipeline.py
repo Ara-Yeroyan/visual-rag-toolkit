@@ -89,6 +89,11 @@ class ProcessingPipeline:
         metadata_mapping: Optional[Dict[str, Dict[str, Any]]] = None,
         config: Optional[Dict[str, Any]] = None,
         embedding_strategy: str = "pooling",
+        crop_empty: bool = False,
+        crop_empty_percentage_to_remove: float = 0.9,
+        crop_empty_remove_page_number: bool = False,
+        crop_empty_preserve_border_px: int = 1,
+        crop_empty_uniform_rowcol_std_threshold: float = 0.0,
     ):
         self.embedder = embedder
         self.indexer = indexer
@@ -103,6 +108,12 @@ class ProcessingPipeline:
                 f"Must be one of: {self.STRATEGIES}"
             )
         self.embedding_strategy = embedding_strategy
+
+        self.crop_empty = bool(crop_empty)
+        self.crop_empty_percentage_to_remove = float(crop_empty_percentage_to_remove)
+        self.crop_empty_remove_page_number = bool(crop_empty_remove_page_number)
+        self.crop_empty_preserve_border_px = int(crop_empty_preserve_border_px)
+        self.crop_empty_uniform_rowcol_std_threshold = float(crop_empty_uniform_rowcol_std_threshold)
         
         logger.info(f"📊 Embedding strategy: {embedding_strategy}")
         if embedding_strategy == "pooling":
@@ -128,6 +139,8 @@ class ProcessingPipeline:
         skip_existing: bool = True,
         upload_to_cloudinary: bool = True,
         upload_to_qdrant: bool = True,
+        original_filename: Optional[str] = None,
+        progress_callback: Optional[callable] = None,
     ) -> Dict[str, Any]:
         """
         Process a single PDF end-to-end.
@@ -137,6 +150,8 @@ class ProcessingPipeline:
             skip_existing: Skip pages that already exist in Qdrant
             upload_to_cloudinary: Upload images to Cloudinary
             upload_to_qdrant: Upload embeddings to Qdrant
+            original_filename: Original filename (use this instead of pdf_path.name for temp files)
+            progress_callback: Optional callback(stage, current, total, message) for progress updates
         
         Returns:
             Dict with processing results:
@@ -150,23 +165,26 @@ class ProcessingPipeline:
             }
         """
         pdf_path = Path(pdf_path)
-        logger.info(f"📚 Processing PDF: {pdf_path.name}")
+        filename = original_filename or pdf_path.name
+        logger.info(f"📚 Processing PDF: {filename}")
         
         # Check existing pages
         existing_ids: Set[str] = set()
         if skip_existing and self.indexer:
-            existing_ids = self.indexer.get_existing_ids(pdf_path.name)
+            existing_ids = self.indexer.get_existing_ids(filename)
             if existing_ids:
                 logger.info(f"   Found {len(existing_ids)} existing pages")
         
-        # Convert PDF to images
         logger.info(f"🖼️ Converting PDF to images...")
+        if progress_callback:
+            progress_callback("convert", 0, 0, "Converting PDF to images...")
         images, texts = self.pdf_processor.process_pdf(pdf_path)
         total_pages = len(images)
         logger.info(f"   ✅ Converted {total_pages} pages")
+        if progress_callback:
+            progress_callback("convert", total_pages, total_pages, f"Converted {total_pages} pages")
         
-        # Get extra metadata
-        extra_metadata = self._get_extra_metadata(pdf_path.name)
+        extra_metadata = self._get_extra_metadata(filename)
         if extra_metadata:
             logger.info(f"   📋 Found extra metadata: {list(extra_metadata.keys())}")
         
@@ -183,12 +201,13 @@ class ProcessingPipeline:
             batch_texts = texts[batch_start:batch_end]
             
             logger.info(f"📦 Processing pages {batch_start + 1}-{batch_end}/{total_pages}")
+            if progress_callback:
+                progress_callback("embed", batch_start, total_pages, f"Embedding pages {batch_start + 1}-{batch_end}")
             
-            # Filter pages that need processing
             pages_to_process = []
             for i, (img, text) in enumerate(zip(batch_images, batch_texts)):
                 page_num = batch_start + i + 1
-                chunk_id = self.generate_chunk_id(pdf_path.name, page_num)
+                chunk_id = self.generate_chunk_id(filename, page_num)
                 
                 if skip_existing and chunk_id in existing_ids:
                     skipped += 1
@@ -198,7 +217,7 @@ class ProcessingPipeline:
                     "index": i,
                     "page_num": page_num,
                     "chunk_id": chunk_id,
-                    "image": img,
+                    "raw_image": img,
                     "text": text,
                 })
             
@@ -208,36 +227,64 @@ class ProcessingPipeline:
             
             # Generate embeddings with token info
             logger.info(f"🤖 Generating embeddings for {len(pages_to_process)} pages...")
-            images_to_embed = [p["image"] for p in pages_to_process]
+            from visual_rag.preprocessing.crop_empty import CropEmptyConfig, crop_empty
+
+            images_to_embed = []
+            for p in pages_to_process:
+                raw_img = p["raw_image"]
+                if self.crop_empty:
+                    cropped_img, crop_meta = crop_empty(
+                        raw_img,
+                        config=CropEmptyConfig(
+                            percentage_to_remove=float(self.crop_empty_percentage_to_remove),
+                            remove_page_number=bool(self.crop_empty_remove_page_number),
+                            preserve_border_px=int(self.crop_empty_preserve_border_px),
+                            uniform_rowcol_std_threshold=float(self.crop_empty_uniform_rowcol_std_threshold),
+                        ),
+                    )
+                    p["embed_image"] = cropped_img
+                    p["crop_meta"] = crop_meta
+                    images_to_embed.append(cropped_img)
+                else:
+                    p["embed_image"] = raw_img
+                    p["crop_meta"] = None
+                    images_to_embed.append(raw_img)
             
             embeddings, token_infos = self.embedder.embed_images(
                 images_to_embed,
                 batch_size=self.embedding_batch_size,
                 return_token_info=True,
-                show_progress=True,
+                show_progress=False,
             )
             
-            # Process each page
             for idx, page_info in enumerate(pages_to_process):
-                orig_img = page_info["image"]
+                raw_img = page_info["raw_image"]
+                embed_img = page_info["embed_image"]
+                crop_meta = page_info["crop_meta"]
                 page_num = page_info["page_num"]
                 chunk_id = page_info["chunk_id"]
                 text = page_info["text"]
                 embedding = embeddings[idx]
                 token_info = token_infos[idx]
                 
+                if progress_callback:
+                    progress_callback("process", page_num, total_pages, f"Processing page {page_num}/{total_pages}")
+                
                 try:
                     page_data = self._process_single_page(
-                        pdf_path=pdf_path,
+                        filename=filename,
+                        pdf_stem=pdf_path.stem,
                         page_num=page_num,
                         chunk_id=chunk_id,
                         total_pages=total_pages,
-                        orig_img=orig_img,
+                        raw_img=raw_img,
+                        embed_img=embed_img,
                         text=text,
                         embedding=embedding,
                         token_info=token_info,
                         extra_metadata=extra_metadata,
                         upload_to_cloudinary=upload_to_cloudinary,
+                        crop_meta=crop_meta,
                     )
                     
                     all_pages.append(page_data)
@@ -265,10 +312,10 @@ class ProcessingPipeline:
             count = self._upload_batch(upload_queue)
             uploaded += count
         
-        logger.info(f"✅ Completed {pdf_path.name}: {uploaded} uploaded, {skipped} skipped, {failed} failed")
+        logger.info(f"✅ Completed {filename}: {uploaded} uploaded, {skipped} skipped, {failed} failed")
         
         return {
-            "filename": pdf_path.name,
+            "filename": filename,
             "total_pages": total_pages,
             "uploaded": uploaded,
             "skipped": skipped,
@@ -278,22 +325,25 @@ class ProcessingPipeline:
     
     def _process_single_page(
         self,
-        pdf_path: Path,
+        filename: str,
+        pdf_stem: str,
         page_num: int,
         chunk_id: str,
         total_pages: int,
-        orig_img,
+        raw_img,
+        embed_img,
         text: str,
         embedding: torch.Tensor,
         token_info: Dict[str, Any],
         extra_metadata: Dict[str, Any],
         upload_to_cloudinary: bool = True,
+        crop_meta: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Process a single page with full metadata for saliency."""
-        from visual_rag.embedding.pooling import tile_level_mean_pooling, global_mean_pooling
+        from visual_rag.embedding.pooling import global_mean_pooling
         
         # Resize image for ColPali
-        resized_img, tile_rows, tile_cols = self.pdf_processor.resize_for_colpali(orig_img)
+        resized_img, tile_rows, tile_cols = self.pdf_processor.resize_for_colpali(embed_img)
         
         # Use processor's tile info if available (more accurate)
         proc_n_rows = token_info.get("n_rows")
@@ -316,10 +366,6 @@ class ProcessingPipeline:
         visual_indices = token_info["visual_token_indices"]
         num_visual_tokens = token_info["num_visual_tokens"]
         
-        # Compute tile structure
-        num_tiles = tile_rows * tile_cols + 1  # +1 for global tile
-        patches_per_tile = 64
-        
         # =========================================================================
         # STRATEGY: "pooling" (NOVEL) vs "standard" (BASELINE) vs "all" (BOTH)
         # =========================================================================
@@ -327,27 +373,39 @@ class ProcessingPipeline:
         # Always compute visual-only embedding (needed for pooling and saliency)
         visual_embedding = full_embedding[visual_indices]
         
-        # Compute tile-level mean pooling: [num_visual_tokens, 128] → [num_tiles, 128]
-        tile_pooled = tile_level_mean_pooling(visual_embedding, num_tiles, patches_per_tile)
-        
-        # Compute global mean (baseline pooling)
+        tile_pooled = self.embedder.mean_pool_visual_embedding(visual_embedding, token_info, target_vectors=32)
+        experimental_pooled = self.embedder.experimental_pool_visual_embedding(
+            visual_embedding, token_info, target_vectors=32, mean_pool=tile_pooled
+        )
         global_pooled = global_mean_pooling(full_embedding)
+        global_pooling = self.embedder.global_pool_from_mean_pool(tile_pooled) if tile_pooled.size else global_pooled
+
+        num_tiles = int(tile_pooled.shape[0])
+        patches_per_tile = int(visual_embedding.shape[0] // max(num_tiles, 1)) if num_tiles else 0
+        if tile_rows and tile_cols and int(tile_rows) * int(tile_cols) + 1 == num_tiles:
+            pass
+        else:
+            tile_rows = token_info.get("n_rows") or None
+            tile_cols = token_info.get("n_cols") or None
         
         if self.embedding_strategy == "pooling":
             # NOVEL APPROACH: Visual tokens only + tile-level pooling
             embedding_for_initial = visual_embedding
             embedding_for_pooling = tile_pooled
+            global_pooling = self.embedder.global_pool_from_mean_pool(tile_pooled) if tile_pooled.size else global_pooled
             
         elif self.embedding_strategy == "standard":
             # BASELINE: All tokens + global mean
             embedding_for_initial = full_embedding
             embedding_for_pooling = global_pooled.reshape(1, -1)
+            global_pooling = global_pooled
             
         else:  # "all" - Push BOTH representations (efficient for comparison)
             # Embed once, store multiple vector representations
             # This allows comparing both strategies without re-embedding
             embedding_for_initial = visual_embedding  # Use visual for search
             embedding_for_pooling = tile_pooled       # Use tile-level for fast prefetch
+            global_pooling = self.embedder.global_pool_from_mean_pool(tile_pooled) if tile_pooled.size else global_pooled
             
             # ALSO store standard representations as additional vectors
             # These will be added to metadata for optional use
@@ -355,21 +413,25 @@ class ProcessingPipeline:
         
         # Upload to Cloudinary
         original_url = None
+        cropped_url = None
         resized_url = None
         
         if upload_to_cloudinary and self.cloudinary_uploader:
-            base_filename = f"{pdf_path.stem}_page_{page_num}"
-            original_url, resized_url = self.cloudinary_uploader.upload_original_and_resized(
-                orig_img, resized_img, base_filename
-            )
+            base_filename = f"{pdf_stem}_page_{page_num}"
+            if self.crop_empty:
+                original_url, cropped_url, resized_url = self.cloudinary_uploader.upload_original_cropped_and_resized(
+                    raw_img, embed_img, resized_img, base_filename
+                )
+            else:
+                original_url, resized_url = self.cloudinary_uploader.upload_original_and_resized(
+                    raw_img, resized_img, base_filename
+                )
         
         # Sanitize text
         safe_text = self._sanitize_text(text[:10000]) if text else ""
         
-        # Build metadata (everything needed for saliency)
         metadata = {
-            # Document info
-            "filename": pdf_path.name,
+            "filename": filename,
             "page_number": page_num,
             "total_pages": total_pages,
             "has_text": bool(text and text.strip()),
@@ -378,11 +440,14 @@ class ProcessingPipeline:
             # Image URLs
             "page": resized_url or "",  # For display
             "original_url": original_url or "",
+            "cropped_url": cropped_url or "",
             "resized_url": resized_url or "",
             
             # Dimensions (needed for saliency overlay)
-            "original_width": orig_img.width,
-            "original_height": orig_img.height,
+            "original_width": raw_img.width,
+            "original_height": raw_img.height,
+            "cropped_width": int(embed_img.width) if self.crop_empty else int(raw_img.width),
+            "cropped_height": int(embed_img.height) if self.crop_empty else int(raw_img.height),
             "resized_width": resized_img.width,
             "resized_height": resized_img.height,
             
@@ -399,6 +464,15 @@ class ProcessingPipeline:
             
             # Strategy used (important for paper comparison)
             "embedding_strategy": self.embedding_strategy,
+
+            "model_name": getattr(self.embedder, "model_name", None),
+
+            "crop_empty_enabled": bool(self.crop_empty),
+            "crop_empty_crop_box": (crop_meta or {}).get("crop_box"),
+            "crop_empty_remove_page_number": bool(self.crop_empty_remove_page_number),
+            "crop_empty_percentage_to_remove": float(self.crop_empty_percentage_to_remove),
+            "crop_empty_preserve_border_px": int(self.crop_empty_preserve_border_px),
+            "crop_empty_uniform_rowcol_std_threshold": float(self.crop_empty_uniform_rowcol_std_threshold),
             
             # Extra metadata (year, district, etc.)
             **extra_metadata,
@@ -408,8 +482,10 @@ class ProcessingPipeline:
             "id": chunk_id,
             "visual_embedding": embedding_for_initial,    # "initial" vector in Qdrant
             "tile_pooled_embedding": embedding_for_pooling,  # "mean_pooling" vector in Qdrant
+            "experimental_pooled_embedding": experimental_pooled,  # "experimental_pooling" vector in Qdrant
+            "global_pooled_embedding": global_pooling,  # "global_pooling" vector in Qdrant
             "metadata": metadata,
-            "image": orig_img,
+            "image": raw_img,
             "resized_image": resized_img,
         }
         

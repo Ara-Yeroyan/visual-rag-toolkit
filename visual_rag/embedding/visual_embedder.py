@@ -70,24 +70,26 @@ class VisualEmbedder:
         backend: str = "auto",
         device: Optional[str] = None,
         torch_dtype: Optional[torch.dtype] = None,
+        output_dtype: Optional[np.dtype] = None,
         batch_size: int = 4,
         filter_special_tokens: bool = True,
+        processor_speed: str = "fast",
     ):
         self.model_name = model_name
         self.batch_size = batch_size
         self.filter_special_tokens = filter_special_tokens
+        if processor_speed not in ("fast", "slow", "auto"):
+            raise ValueError("processor_speed must be one of: fast, slow, auto")
+        self.processor_speed = processor_speed
         
-        # Allow override via environment variable
         if os.getenv("VISUALRAG_INCLUDE_SPECIAL_TOKENS"):
             self.filter_special_tokens = False
             logger.info("Special token filtering disabled via VISUALRAG_INCLUDE_SPECIAL_TOKENS")
         
-        # Auto-detect backend from model name
         if backend == "auto":
             backend = self._detect_backend(model_name)
         self.backend = backend
         
-        # Auto-detect device
         if device is None:
             if torch.cuda.is_available():
                 device = "cuda"
@@ -97,7 +99,6 @@ class VisualEmbedder:
                 device = "cpu"
         self.device = device
         
-        # Auto-detect dtype
         if torch_dtype is None:
             if device == "cuda":
                 torch_dtype = torch.bfloat16
@@ -105,7 +106,13 @@ class VisualEmbedder:
                 torch_dtype = torch.float32
         self.torch_dtype = torch_dtype
         
-        # Lazy model loading
+        if output_dtype is None:
+            if torch_dtype == torch.float16:
+                output_dtype = np.float16
+            else:
+                output_dtype = np.float32
+        self.output_dtype = output_dtype
+        
         self._model = None
         self._processor = None
         self._image_token_id = None
@@ -113,7 +120,7 @@ class VisualEmbedder:
         logger.info(f"🤖 VisualEmbedder initialized")
         logger.info(f"   Model: {model_name}")
         logger.info(f"   Backend: {backend}")
-        logger.info(f"   Device: {device}, dtype: {torch_dtype}")
+        logger.info(f"   Device: {device}, torch_dtype: {torch_dtype}, output_dtype: {output_dtype}")
     
     def _detect_backend(self, model_name: str) -> str:
         """Auto-detect backend from model name."""
@@ -141,7 +148,14 @@ class VisualEmbedder:
     def _load_colpali_model(self):
         """Load ColPali-family model."""
         try:
-            from colpali_engine.models import ColIdefics3, ColIdefics3Processor
+            from colpali_engine.models import (
+                ColIdefics3,
+                ColIdefics3Processor,
+                ColPali,
+                ColPaliProcessor,
+                ColQwen2,
+                ColQwen2Processor,
+            )
         except ImportError:
             raise ImportError(
                 "colpali_engine not installed. Install with: "
@@ -151,25 +165,80 @@ class VisualEmbedder:
         
         logger.info(f"🤖 Loading ColPali model: {self.model_name}")
         logger.info(f"   Device: {self.device}, dtype: {self.torch_dtype}")
+
+        def _processor_kwargs():
+            if self.processor_speed == "auto":
+                return {}
+            return {"use_fast": self.processor_speed == "fast"}
         
-        # Determine attention implementation
+        from transformers import AutoConfig
+
+        cfg = AutoConfig.from_pretrained(self.model_name)
+        model_type = str(getattr(cfg, "model_type", "") or "").lower()
+
+        if model_type == "colpali" or "colpali" in (self.model_name or "").lower():
+            self._model = ColPali.from_pretrained(
+                self.model_name,
+                torch_dtype=self.torch_dtype,
+                device_map=self.device,
+            ).eval()
+            try:
+                self._processor = ColPaliProcessor.from_pretrained(self.model_name, **_processor_kwargs())
+            except TypeError:
+                self._processor = ColPaliProcessor.from_pretrained(self.model_name)
+            except Exception:
+                if self.processor_speed == "fast":
+                    self._processor = ColPaliProcessor.from_pretrained(self.model_name, use_fast=False)
+                else:
+                    raise
+            self._image_token_id = self._processor.image_token_id
+            logger.info("✅ Loaded ColPali backend")
+            return
+
+        if model_type.startswith("qwen2") or "colqwen" in (self.model_name or "").lower():
+            self._model = ColQwen2.from_pretrained(
+                self.model_name,
+                dtype=self.torch_dtype,
+                device_map=self.device,
+            ).eval()
+            try:
+                self._processor = ColQwen2Processor.from_pretrained(self.model_name, device_map=self.device, **_processor_kwargs())
+            except TypeError:
+                self._processor = ColQwen2Processor.from_pretrained(self.model_name, device_map=self.device)
+            except Exception:
+                if self.processor_speed == "fast":
+                    self._processor = ColQwen2Processor.from_pretrained(self.model_name, device_map=self.device, use_fast=False)
+                else:
+                    raise
+            self._image_token_id = self._processor.image_token_id
+            logger.info("✅ Loaded ColQwen2 backend")
+            return
+
         attn_implementation = "eager"
         if self.device != "cpu":
             try:
                 import flash_attn  # noqa
+
                 attn_implementation = "flash_attention_2"
                 logger.info("   Using FlashAttention2")
             except ImportError:
                 pass
-        
+
         self._model = ColIdefics3.from_pretrained(
             self.model_name,
             dtype=self.torch_dtype,
             device_map=self.device,
             attn_implementation=attn_implementation,
         ).eval()
-        
-        self._processor = ColIdefics3Processor.from_pretrained(self.model_name)
+        try:
+            self._processor = ColIdefics3Processor.from_pretrained(self.model_name, **_processor_kwargs())
+        except TypeError:
+            self._processor = ColIdefics3Processor.from_pretrained(self.model_name)
+        except Exception:
+            if self.processor_speed == "fast":
+                self._processor = ColIdefics3Processor.from_pretrained(self.model_name, use_fast=False)
+            else:
+                raise
         self._image_token_id = self._processor.image_token_id
         
         logger.info("✅ Model loaded successfully")
@@ -244,6 +313,61 @@ class VisualEmbedder:
             logger.debug(f"Query embedding: {embedding.shape[0]} tokens (unfiltered)")
         
         return embedding
+
+    def embed_queries(
+        self,
+        query_texts: List[str],
+        batch_size: Optional[int] = None,
+        filter_special_tokens: Optional[bool] = None,
+        show_progress: bool = True,
+    ) -> List[torch.Tensor]:
+        """
+        Generate embeddings for a list of text queries.
+
+        Returns a list of tensors, each of shape [num_tokens, embedding_dim].
+        """
+        should_filter = (
+            filter_special_tokens if filter_special_tokens is not None else self.filter_special_tokens
+        )
+        batch_size = batch_size or self.batch_size
+
+        outputs: List[torch.Tensor] = []
+        iterator = range(0, len(query_texts), batch_size)
+        if show_progress:
+            iterator = tqdm(iterator, desc="📝 Embedding queries", unit="batch")
+
+        for i in iterator:
+            batch = query_texts[i : i + batch_size]
+            with torch.no_grad():
+                processed = self.processor.process_queries(batch).to(self.model.device)
+                batch_embeddings = self.model(**processed)
+
+            if isinstance(batch_embeddings, torch.Tensor) and batch_embeddings.dim() == 3:
+                attn = processed.get("attention_mask") if should_filter else None
+                input_ids = processed.get("input_ids") if should_filter else None
+
+                for j in range(batch_embeddings.shape[0]):
+                    emb = batch_embeddings[j]
+                    if should_filter and attn is not None:
+                        valid_mask = attn[j].bool()
+                        emb = emb[valid_mask]
+                        if input_ids is not None:
+                            ids = input_ids[j][valid_mask]
+                            non_special_mask = ids >= 4
+                            if non_special_mask.any():
+                                emb = emb[non_special_mask]
+                    outputs.append(emb)
+            else:
+                outputs.extend(batch_embeddings)
+
+            del processed, batch_embeddings
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            elif torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+
+        return outputs
     
     def embed_images(
         self,
@@ -274,6 +398,8 @@ class VisualEmbedder:
             - num_tiles: Total tiles (n_rows × n_cols + 1 global)
         """
         batch_size = batch_size or self.batch_size
+        if self.device == "mps" and "colpali" in (self.model_name or "").lower() and int(batch_size) > 1:
+            batch_size = 1
         
         embeddings = []
         token_infos = [] if return_token_info else None
@@ -325,6 +451,8 @@ class VisualEmbedder:
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            elif torch.backends.mps.is_available():
+                torch.mps.empty_cache()
         
         if return_token_info:
             return embeddings, token_infos
@@ -357,10 +485,92 @@ class VisualEmbedder:
         else:
             visual_emb = np.array(full_embedding)[visual_indices]
         
-        return visual_emb.astype(np.float32)
+        return visual_emb.astype(self.output_dtype)
 
+    def mean_pool_visual_embedding(
+        self,
+        visual_embedding: Union[torch.Tensor, np.ndarray],
+        token_info: Optional[Dict[str, Any]] = None,
+        *,
+        target_vectors: int = 32,
+    ) -> np.ndarray:
+        from visual_rag.embedding.pooling import colpali_row_mean_pooling, tile_level_mean_pooling
+
+        model_lower = (self.model_name or "").lower()
+        is_colsmol = "colsmol" in model_lower
+
+        if isinstance(visual_embedding, torch.Tensor):
+            if visual_embedding.dtype == torch.bfloat16:
+                visual_np = visual_embedding.cpu().float().numpy()
+            else:
+                visual_np = visual_embedding.cpu().numpy().astype(np.float32)
+        else:
+            visual_np = np.array(visual_embedding, dtype=np.float32)
+
+        if is_colsmol:
+            n_rows = (token_info or {}).get("n_rows")
+            n_cols = (token_info or {}).get("n_cols")
+            num_tiles = int(n_rows) * int(n_cols) + 1 if n_rows and n_cols else 13
+            return tile_level_mean_pooling(visual_np, num_tiles=num_tiles, patches_per_tile=64, output_dtype=self.output_dtype)
+
+        num_tokens = int(visual_np.shape[0])
+        grid = int(round(float(num_tokens) ** 0.5))
+        if grid * grid != num_tokens:
+            raise ValueError(f"Cannot infer square grid from num_visual_tokens={num_tokens} for model={self.model_name}")
+        if int(target_vectors) != int(grid):
+            raise ValueError(
+                f"target_vectors={target_vectors} does not match inferred grid_size={grid} for model={self.model_name}"
+            )
+        return colpali_row_mean_pooling(visual_np, grid_size=int(target_vectors), output_dtype=self.output_dtype)
+
+    def global_pool_from_mean_pool(self, mean_pool: np.ndarray) -> np.ndarray:
+        if mean_pool.size == 0:
+            return np.zeros((128,), dtype=self.output_dtype)
+        return mean_pool.mean(axis=0).astype(self.output_dtype)
+
+    def experimental_pool_visual_embedding(
+        self,
+        visual_embedding: Union[torch.Tensor, np.ndarray],
+        token_info: Optional[Dict[str, Any]] = None,
+        *,
+        target_vectors: int = 32,
+        mean_pool: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        from visual_rag.embedding.pooling import colpali_experimental_pooling_from_rows, colsmol_experimental_pooling
+
+        model_lower = (self.model_name or "").lower()
+        is_colsmol = "colsmol" in model_lower
+
+        if isinstance(visual_embedding, torch.Tensor):
+            if visual_embedding.dtype == torch.bfloat16:
+                visual_np = visual_embedding.cpu().float().numpy()
+            else:
+                visual_np = visual_embedding.cpu().numpy().astype(np.float32)
+        else:
+            visual_np = np.array(visual_embedding, dtype=np.float32)
+
+        if is_colsmol:
+            if mean_pool is not None and getattr(mean_pool, "shape", None) is not None and int(mean_pool.shape[0]) > 0:
+                num_tiles = int(mean_pool.shape[0])
+            else:
+                num_tiles = (token_info or {}).get("num_tiles")
+                if num_tiles is None:
+                    num_visual_tokens = (token_info or {}).get("num_visual_tokens")
+                    if num_visual_tokens is None:
+                        num_visual_tokens = int(visual_np.shape[0])
+                    patches_per_tile = 64
+                    num_tiles = int(num_visual_tokens) // patches_per_tile
+                    if int(num_tiles) * patches_per_tile != int(num_visual_tokens):
+                        num_tiles = int(num_tiles) + 1
+                num_tiles = int(num_tiles)
+            return colsmol_experimental_pooling(visual_np, num_tiles=num_tiles, patches_per_tile=64, output_dtype=self.output_dtype)
+
+        rows = mean_pool if mean_pool is not None else self.mean_pool_visual_embedding(visual_np, token_info, target_vectors=target_vectors)
+        if int(rows.shape[0]) != int(target_vectors):
+            raise ValueError(
+                f"experimental pooling expects mean_pool to have {target_vectors} rows, got {rows.shape[0]} for model={self.model_name}"
+            )
+        return colpali_experimental_pooling_from_rows(rows, output_dtype=self.output_dtype)
 
 # Backward compatibility alias
 ColPaliEmbedder = VisualEmbedder
-
-
