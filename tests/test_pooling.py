@@ -69,6 +69,95 @@ class TestGlobalPooling:
         np.testing.assert_array_almost_equal(pooled, embedding.mean(axis=0))
 
 
+class TestColPaliExperimentalPooling:
+    """Test ColPali experimental pooling (convolution-style with window 3)."""
+
+    def test_output_shape_n_plus_2(self):
+        """For N rows, should produce N + 2 vectors."""
+        from visual_rag.embedding.pooling import colpali_experimental_pooling_from_rows
+
+        for n in [4, 10, 32, 64]:
+            rows = np.random.randn(n, 128).astype(np.float32)
+            pooled = colpali_experimental_pooling_from_rows(rows)
+            assert pooled.shape == (n + 2, 128), f"Expected ({n + 2}, 128), got {pooled.shape}"
+
+    def test_32_rows_produces_34_vectors(self):
+        """Specifically test ColPali case: 32 rows → 34 vectors."""
+        from visual_rag.embedding.pooling import colpali_experimental_pooling_from_rows
+
+        rows = np.random.randn(32, 128).astype(np.float32)
+        pooled = colpali_experimental_pooling_from_rows(rows)
+        assert pooled.shape == (34, 128), f"Expected (34, 128), got {pooled.shape}"
+
+    def test_first_vector_is_first_row(self):
+        """Position 0 should be first row alone."""
+        from visual_rag.embedding.pooling import colpali_experimental_pooling_from_rows
+
+        rows = np.random.randn(10, 128).astype(np.float32)
+        pooled = colpali_experimental_pooling_from_rows(rows)
+        np.testing.assert_array_almost_equal(pooled[0], rows[0])
+
+    def test_second_vector_is_mean_first_two(self):
+        """Position 1 should be mean of first 2 rows."""
+        from visual_rag.embedding.pooling import colpali_experimental_pooling_from_rows
+
+        rows = np.random.randn(10, 128).astype(np.float32)
+        pooled = colpali_experimental_pooling_from_rows(rows)
+        expected = rows[:2].mean(axis=0)
+        np.testing.assert_array_almost_equal(pooled[1], expected)
+
+    def test_third_vector_is_mean_first_three(self):
+        """Position 2 should be mean of first 3 rows."""
+        from visual_rag.embedding.pooling import colpali_experimental_pooling_from_rows
+
+        rows = np.random.randn(10, 128).astype(np.float32)
+        pooled = colpali_experimental_pooling_from_rows(rows)
+        expected = rows[:3].mean(axis=0)
+        np.testing.assert_array_almost_equal(pooled[2], expected)
+
+    def test_sliding_window_middle(self):
+        """Middle positions should be sliding window of 3."""
+        from visual_rag.embedding.pooling import colpali_experimental_pooling_from_rows
+
+        rows = np.random.randn(10, 128).astype(np.float32)
+        pooled = colpali_experimental_pooling_from_rows(rows)
+        expected_pos5 = rows[3:6].mean(axis=0)
+        np.testing.assert_array_almost_equal(pooled[5], expected_pos5)
+
+    def test_last_vector_is_last_row(self):
+        """Last position should be last row alone."""
+        from visual_rag.embedding.pooling import colpali_experimental_pooling_from_rows
+
+        rows = np.random.randn(10, 128).astype(np.float32)
+        pooled = colpali_experimental_pooling_from_rows(rows)
+        np.testing.assert_array_almost_equal(pooled[-1], rows[-1])
+
+    def test_second_to_last_is_mean_last_two(self):
+        """Position N should be mean of last 2 rows."""
+        from visual_rag.embedding.pooling import colpali_experimental_pooling_from_rows
+
+        rows = np.random.randn(10, 128).astype(np.float32)
+        pooled = colpali_experimental_pooling_from_rows(rows)
+        expected = rows[-2:].mean(axis=0)
+        np.testing.assert_array_almost_equal(pooled[-2], expected)
+
+    def test_edge_cases(self):
+        """Test edge cases: n=1, n=2, n=3."""
+        from visual_rag.embedding.pooling import colpali_experimental_pooling_from_rows
+
+        rows1 = np.random.randn(1, 128).astype(np.float32)
+        pooled1 = colpali_experimental_pooling_from_rows(rows1)
+        assert pooled1.shape == (1, 128)
+
+        rows2 = np.random.randn(2, 128).astype(np.float32)
+        pooled2 = colpali_experimental_pooling_from_rows(rows2)
+        assert pooled2.shape == (3, 128)
+
+        rows3 = np.random.randn(3, 128).astype(np.float32)
+        pooled3 = colpali_experimental_pooling_from_rows(rows3)
+        assert pooled3.shape == (5, 128)
+
+
 class TestMaxSimScore:
     """Test MaxSim scoring."""
     
@@ -108,4 +197,3 @@ class TestMaxSimScore:
         
         assert isinstance(score, float)
         assert not np.isnan(score)
-
