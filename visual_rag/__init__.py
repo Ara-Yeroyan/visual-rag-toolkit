@@ -33,7 +33,7 @@ Each component works independently - use only what you need.
 
 import logging
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 
 def setup_logging(level: str = "INFO", format: str = None) -> None:
