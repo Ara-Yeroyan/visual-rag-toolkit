@@ -71,6 +71,11 @@ try:
 except ImportError:
     QdrantAdmin = None
 
+try:
+    from visual_rag.demo_runner import demo
+except ImportError:
+    demo = None
+
 # Config utilities (always available)
 from visual_rag.config import load_config, get, get_section
 
@@ -86,6 +91,7 @@ __all__ = [
     "TwoStageRetriever",
     "MultiVectorRetriever",
     "QdrantAdmin",
+    "demo",
     
     # Config utilities
     "load_config",

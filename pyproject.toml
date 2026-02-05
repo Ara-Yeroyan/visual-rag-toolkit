@@ -73,6 +73,8 @@ cloudinary = [
 ui = [
     "streamlit>=1.25.0",
     "httpx>=0.24.0",
+    "pandas>=2.0.0",
+    "altair>=5.0.0",
 ]
 
 # All dependencies
@@ -90,6 +92,8 @@ all = [
     # ui
     "streamlit>=1.25.0",
     "httpx>=0.24.0",
+    "pandas>=2.0.0",
+    "altair>=5.0.0",
 ]
 
 # Development dependencies
@@ -103,6 +107,7 @@ dev = [
 
 [project.scripts]
 visual-rag = "visual_rag.cli.main:main"
+visual-rag-demo = "visual_rag.demo_runner:main"
 
 [project.urls]
 Homepage = "https://github.com/Ara-Yeroyan/visual-rag-toolkit"
@@ -111,7 +116,7 @@ Repository = "https://github.com/Ara-Yeroyan/visual-rag-toolkit"
 Issues = "https://github.com/Ara-Yeroyan/visual-rag-toolkit/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["visual_rag", "benchmarks"]
+packages = ["visual_rag", "benchmarks", "demo"]
 
 [tool.hatch.build.targets.sdist]
 # Keep source distributions clean (no local artifacts, eval results, caches).

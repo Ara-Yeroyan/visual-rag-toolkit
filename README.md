@@ -159,7 +159,12 @@ search:
 
 ```bash
 pip install "visual-rag-toolkit[ui,qdrant,embedding,pdf]"
-streamlit run demo/app.py
+
+# Option A: from Python
+python -c "import visual_rag; visual_rag.demo()"
+
+# Option B: CLI launcher
+visual-rag-demo
 ```
 
 ## 📊 Benchmark Evaluation
