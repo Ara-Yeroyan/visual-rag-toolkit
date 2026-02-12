@@ -12,8 +12,11 @@ The embedder is BACKEND-AGNOSTIC - configure which model to use via the
 """
 
 import gc
+import json
 import logging
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -164,6 +167,12 @@ class VisualEmbedder:
                 "pip install visual-rag-toolkit[embedding] or "
                 "pip install colpali-engine"
             )
+        try:
+            # Newer colpali-engine versions add ColQwen2.5 support
+            from colpali_engine.models import ColQwen2_5, ColQwen2_5_Processor
+        except Exception:
+            ColQwen2_5 = None
+            ColQwen2_5_Processor = None
 
         logger.info(f"🤖 Loading ColPali model: {self.model_name}")
         logger.info(f"   Device: {self.device}, dtype: {self.torch_dtype}")
@@ -201,7 +210,54 @@ class VisualEmbedder:
             logger.info("✅ Loaded ColPali backend")
             return
 
-        if model_type.startswith("qwen2") or "colqwen" in (self.model_name or "").lower():
+        model_lower = (self.model_name or "").lower()
+        is_qwen25 = (
+            "colqwen2.5" in model_lower
+            or "colqwen2_5" in model_lower
+            or "qwen2_5" in model_type
+            or "qwen2.5" in model_type
+        )
+        if is_qwen25:
+            if ColQwen2_5 is None or ColQwen2_5_Processor is None:
+                raise ImportError(
+                    "ColQwen2.5 requires a newer colpali-engine. Install/upgrade with:\n"
+                    '  pip install "transformers>=4.45.0"\n'
+                    "  pip install git+https://github.com/illuin-tech/colpali\n"
+                    "or ensure colpali-engine>=0.3.7 is installed."
+                )
+            attn_implementation = None
+            if self.device != "cpu":
+                try:
+                    from transformers.utils.import_utils import is_flash_attn_2_available
+
+                    if is_flash_attn_2_available():
+                        attn_implementation = "flash_attention_2"
+                except Exception:
+                    pass
+            self._model = ColQwen2_5.from_pretrained(
+                self.model_name,
+                torch_dtype=self.torch_dtype,
+                device_map=self.device,
+                attn_implementation=attn_implementation,
+            ).eval()
+            try:
+                self._processor = ColQwen2_5_Processor.from_pretrained(
+                    self.model_name, **_processor_kwargs()
+                )
+            except TypeError:
+                self._processor = ColQwen2_5_Processor.from_pretrained(self.model_name)
+            except Exception:
+                if self.processor_speed == "fast":
+                    self._processor = ColQwen2_5_Processor.from_pretrained(
+                        self.model_name, use_fast=False
+                    )
+                else:
+                    raise
+            self._image_token_id = self._processor.image_token_id
+            logger.info("✅ Loaded ColQwen2.5 backend")
+            return
+
+        if model_type.startswith("qwen2") or "colqwen" in model_lower:
             self._model = ColQwen2.from_pretrained(
                 self.model_name,
                 dtype=self.torch_dtype,
@@ -350,6 +406,9 @@ class VisualEmbedder:
         batch_size = batch_size or self.batch_size
 
         outputs: List[torch.Tensor] = []
+        fallback_count = 0
+        nan_log_path: Optional[Path] = None
+        nan_logged = 0
         iterator = range(0, len(query_texts), batch_size)
         if show_progress:
             iterator = tqdm(iterator, desc="📝 Embedding queries", unit="batch")
@@ -374,6 +433,63 @@ class VisualEmbedder:
                             non_special_mask = ids >= 4
                             if non_special_mask.any():
                                 emb = emb[non_special_mask]
+                    # ColQwen2.5 on MPS can produce NaNs when batching queries.
+                    # If we detect NaNs/Infs, recompute the query embedding individually (stable).
+                    try:
+                        has_nan = bool(torch.isnan(emb).any())
+                        has_inf = bool(torch.isinf(emb).any())
+                        if has_nan or has_inf:
+                            # Persist a reproducible sample for debugging.
+                            try:
+                                if nan_log_path is None:
+                                    log_dir = os.getenv("VISUALRAG_NAN_LOG_DIR") or str(
+                                        Path("results") / "nan_samples"
+                                    )
+                                    Path(log_dir).mkdir(parents=True, exist_ok=True)
+                                    safe_model = (
+                                        str(self.model_name or "model")
+                                        .replace("/", "_")
+                                        .replace(" ", "_")
+                                        .replace(":", "_")
+                                    )
+                                    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                                    nan_log_path = (
+                                        Path(log_dir) / f"nan_queries__{safe_model}__{ts}.jsonl"
+                                    )
+
+                                rec = {
+                                    "ts": datetime.now(timezone.utc).isoformat(),
+                                    "model_name": str(self.model_name),
+                                    "device": str(self.device),
+                                    "torch_dtype": str(self.torch_dtype),
+                                    "output_dtype": str(self.output_dtype),
+                                    "processor_speed": str(
+                                        getattr(self, "processor_speed", "unknown")
+                                    ),
+                                    "filter_special_tokens": bool(should_filter),
+                                    "batch_size": int(batch_size),
+                                    "global_query_index": int(i + j),
+                                    "query_text": str(batch[j]),
+                                    "has_nan": bool(has_nan),
+                                    "has_inf": bool(has_inf),
+                                    "torch_version": str(getattr(torch, "__version__", "")),
+                                }
+                                with nan_log_path.open("a", encoding="utf-8") as f:
+                                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                                nan_logged += 1
+                                if nan_logged <= 3:
+                                    logger.warning(
+                                        "NaN/Inf detected in batched query embedding (idx=%d). "
+                                        "Logged sample to %s. Recomputing this query individually.",
+                                        int(i + j),
+                                        str(nan_log_path),
+                                    )
+                            except Exception:
+                                pass
+                            fallback_count += 1
+                            emb = self.embed_query(batch[j], filter_special_tokens=should_filter)
+                    except Exception:
+                        pass
                     outputs.append(emb)
             else:
                 outputs.extend(batch_embeddings)
@@ -385,6 +501,17 @@ class VisualEmbedder:
             elif torch.backends.mps.is_available():
                 torch.mps.empty_cache()
 
+        if fallback_count > 0:
+            logger.warning(
+                "embed_queries(): detected NaN/Inf in %d/%d queries; "
+                "recomputed those queries individually for stability.",
+                int(fallback_count),
+                int(len(query_texts)),
+            )
+            if nan_log_path is not None and nan_logged > 0:
+                logger.warning(
+                    "NaN/Inf samples written to %s (%d rows).", str(nan_log_path), int(nan_logged)
+                )
         return outputs
 
     def embed_images(
@@ -441,6 +568,12 @@ class VisualEmbedder:
                     input_ids = processed["input_ids"]
                     batch_n_rows = processed.get("n_rows")
                     batch_n_cols = processed.get("n_cols")
+                    # Qwen2/2.5-VL style grid information (T, H, W)
+                    batch_grid_thw = processed.get("image_grid_thw", None)
+                    if batch_grid_thw is None:
+                        batch_grid_thw = processed.get("grid_thw", None)
+                    if batch_grid_thw is None:
+                        batch_grid_thw = processed.get("image_grid", None)
 
                     for j in range(input_ids.shape[0]):
                         # Find visual token indices
@@ -449,6 +582,30 @@ class VisualEmbedder:
 
                         n_rows = batch_n_rows[j].item() if batch_n_rows is not None else None
                         n_cols = batch_n_cols[j].item() if batch_n_cols is not None else None
+                        grid_t = grid_h = grid_w = None
+                        grid_h_eff = grid_w_eff = None
+                        if batch_grid_thw is not None:
+                            try:
+                                g = batch_grid_thw[j]
+                                # sometimes [B, N, 3] -> take first image
+                                if hasattr(g, "dim") and g.dim() == 2:
+                                    g = g[0]
+                                t, h, w = [int(x) for x in g.detach().cpu().tolist()]
+                                grid_t, grid_h, grid_w = t, h, w
+                                # ColQwen2.5/Qwen2.5-VL uses a 2×2 spatial merge internally, but different
+                                # processor versions expose different grids:
+                                # - Some expose the *post-merge* token grid (H×W == num_visual_tokens)
+                                # - Others expose the *pre-merge* pixel/patch grid ((H/2)×(W/2) == num_visual_tokens)
+                                # We infer the effective grid by matching the observed token count.
+                                num_visual = int(len(visual_indices))
+                                if int(h) * int(w) == num_visual:
+                                    grid_h_eff, grid_w_eff = int(h), int(w)
+                                elif (
+                                    h % 2 == 0 and w % 2 == 0 and (h // 2) * (w // 2) == num_visual
+                                ):
+                                    grid_h_eff, grid_w_eff = int(h // 2), int(w // 2)
+                            except Exception:
+                                pass
 
                         token_infos.append(
                             {
@@ -457,6 +614,11 @@ class VisualEmbedder:
                                 "n_rows": n_rows,
                                 "n_cols": n_cols,
                                 "num_tiles": (n_rows * n_cols + 1) if n_rows and n_cols else None,
+                                "grid_t": grid_t,
+                                "grid_h": grid_h,
+                                "grid_w": grid_w,
+                                "grid_h_eff": grid_h_eff,
+                                "grid_w_eff": grid_w_eff,
                             }
                         )
 
@@ -516,12 +678,29 @@ class VisualEmbedder:
         visual_embedding: Union[torch.Tensor, np.ndarray],
         token_info: Optional[Dict[str, Any]] = None,
         *,
-        target_vectors: int = 32,
+        target_vectors: Optional[int] = 32,
     ) -> np.ndarray:
-        from visual_rag.embedding.pooling import colpali_row_mean_pooling, tile_level_mean_pooling
+        from visual_rag.embedding.pooling import (
+            adaptive_row_mean_pooling_from_grid,
+            colpali_row_mean_pooling,
+            tile_level_mean_pooling,
+        )
 
         model_lower = (self.model_name or "").lower()
         is_colsmol = "colsmol" in model_lower
+        is_colqwen25 = "colqwen2.5" in model_lower or "colqwen2_5" in model_lower
+        target_vectors_cap: Optional[int]
+        if target_vectors is None:
+            target_vectors_cap = None
+        else:
+            try:
+                tv = int(target_vectors)
+            except Exception:
+                tv = 32
+            target_vectors_cap = None if tv <= 0 else tv
+        # For non-dynamic models, default to the historical fixed 32 vectors when unset.
+        if not is_colqwen25 and target_vectors_cap is None:
+            target_vectors_cap = 32
 
         if isinstance(visual_embedding, torch.Tensor):
             if visual_embedding.dtype == torch.bfloat16:
@@ -539,19 +718,60 @@ class VisualEmbedder:
                 visual_np, num_tiles=num_tiles, patches_per_tile=64, output_dtype=self.output_dtype
             )
 
+        # ColQwen2.5 supports dynamic resolutions. The processor provides a pre-merge grid (grid_h/grid_w),
+        # but the *effective* token grid is (grid_h_eff, grid_w_eff) due to 2×2 spatial merge.
+        # We follow the dynamic shape by default:
+        # - if target_vectors is unset (None or <=0), return all effective rows (no cap, no upsampling)
+        # - else, return <= target_vectors rows (no upsampling).
         num_tokens = int(visual_np.shape[0])
+        if is_colqwen25:
+            grid_h_eff = (token_info or {}).get("grid_h_eff")
+            grid_w_eff = (token_info or {}).get("grid_w_eff")
+            if grid_h_eff and grid_w_eff and int(grid_h_eff) * int(grid_w_eff) == int(num_tokens):
+                # Compute row means over the *effective* grid.
+                target_rows = int(grid_h_eff)
+                if target_vectors_cap is not None:
+                    target_rows = min(int(target_vectors_cap), int(grid_h_eff))
+                pooled_rows = adaptive_row_mean_pooling_from_grid(
+                    visual_np,
+                    grid_h=int(grid_h_eff),
+                    grid_w=int(grid_w_eff),
+                    target_rows=target_rows,
+                    output_dtype=self.output_dtype,
+                )
+                return pooled_rows
+
+        # Fallback: infer a square grid if possible
         grid = int(round(float(num_tokens) ** 0.5))
-        if grid * grid != num_tokens:
-            raise ValueError(
-                f"Cannot infer square grid from num_visual_tokens={num_tokens} for model={self.model_name}"
+        if grid * grid == num_tokens:
+            # For ColQwen2.5 with unset cap, keep all rows (grid) rather than defaulting to 32.
+            effective_target_rows = (
+                int(grid) if (is_colqwen25 and target_vectors_cap is None) else int(target_vectors_cap)
             )
-        if int(target_vectors) != int(grid):
-            raise ValueError(
-                f"target_vectors={target_vectors} does not match inferred grid_size={grid} for model={self.model_name}"
+            if int(grid) == int(effective_target_rows):
+                return colpali_row_mean_pooling(
+                    visual_np, grid_size=int(effective_target_rows), output_dtype=self.output_dtype
+                )
+            return adaptive_row_mean_pooling_from_grid(
+                visual_np,
+                grid_h=int(grid),
+                grid_w=int(grid),
+                target_rows=int(effective_target_rows),
+                output_dtype=self.output_dtype,
             )
-        return colpali_row_mean_pooling(
-            visual_np, grid_size=int(target_vectors), output_dtype=self.output_dtype
-        )
+
+        # Last-resort: treat tokens as a sequence and adaptively mean-pool chunks to target_vectors rows.
+        # If unset (None/<=0), fall back to 32 to avoid returning extremely large multi-vectors.
+        tv_last = int(target_vectors_cap or 32)
+        edges = np.linspace(0, num_tokens, tv_last + 1)
+        pooled = np.zeros((tv_last, int(visual_np.shape[1])), dtype=np.float32)
+        for i in range(tv_last):
+            s = int(np.floor(edges[i]))
+            e = int(np.ceil(edges[i + 1]))
+            s = max(0, min(s, num_tokens - 1))
+            e = max(s + 1, min(e, num_tokens))
+            pooled[i] = visual_np[s:e].mean(axis=0)
+        return pooled.astype(self.output_dtype)
 
     def global_pool_from_mean_pool(self, mean_pool: np.ndarray) -> np.ndarray:
         if mean_pool.size == 0:
@@ -563,7 +783,7 @@ class VisualEmbedder:
         visual_embedding: Union[torch.Tensor, np.ndarray],
         token_info: Optional[Dict[str, Any]] = None,
         *,
-        target_vectors: int = 32,
+        target_vectors: Optional[int] = 32,
         mean_pool: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         from visual_rag.embedding.pooling import (
@@ -573,6 +793,7 @@ class VisualEmbedder:
 
         model_lower = (self.model_name or "").lower()
         is_colsmol = "colsmol" in model_lower
+        is_colqwen25 = "colqwen2.5" in model_lower or "colqwen2_5" in model_lower
 
         if isinstance(visual_embedding, torch.Tensor):
             if visual_embedding.dtype == torch.bfloat16:
@@ -611,11 +832,11 @@ class VisualEmbedder:
                 visual_np, token_info, target_vectors=target_vectors
             )
         )
-        if int(rows.shape[0]) != int(target_vectors):
-            raise ValueError(
-                f"experimental pooling expects mean_pool to have {target_vectors} rows, got {rows.shape[0]} for model={self.model_name}"
-            )
-        return colpali_experimental_pooling_from_rows(rows, output_dtype=self.output_dtype)
+        # For ColPali we usually expect fixed 32 rows; for ColQwen2.5 the row count is dynamic (<= target_vectors).
+        window = 5 if is_colqwen25 else 3
+        return colpali_experimental_pooling_from_rows(
+            rows, window_size=window, output_dtype=self.output_dtype
+        )
 
 
 # Backward compatibility alias

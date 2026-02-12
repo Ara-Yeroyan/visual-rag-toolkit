@@ -105,7 +105,7 @@ class TwoStageRetriever:
         top_k: int = 10,
         prefetch_k: Optional[int] = None,
         filter_obj=None,
-        stage1_mode: str = "pooled_query_vs_tiles",
+        stage1_mode: str = "pooled_query_vs_standard_pooling",
     ) -> List[Dict[str, Any]]:
         """
         Two-stage retrieval using Qdrant's native prefetch (all server-side).
@@ -128,16 +128,26 @@ class TwoStageRetriever:
         if prefetch_k is None:
             prefetch_k = max(100, top_k * 10)
 
+        # Backwards-compatible aliases:
         if stage1_mode == "pooled_query_vs_tiles":
+            stage1_mode = "pooled_query_vs_standard_pooling"
+        elif stage1_mode == "tokens_vs_tiles":
+            stage1_mode = "tokens_vs_standard_pooling"
+        elif stage1_mode == "pooled_query_vs_experimental":
+            stage1_mode = "pooled_query_vs_experimental_pooling"
+        elif stage1_mode == "tokens_vs_experimental":
+            stage1_mode = "tokens_vs_experimental_pooling"
+
+        if stage1_mode == "pooled_query_vs_standard_pooling":
             prefetch_query = query_np.mean(axis=0).tolist()
             prefetch_using = self.pooled_vector_name
-        elif stage1_mode == "tokens_vs_tiles":
+        elif stage1_mode == "tokens_vs_standard_pooling":
             prefetch_query = query_np.tolist()
             prefetch_using = self.pooled_vector_name
-        elif stage1_mode == "pooled_query_vs_experimental":
+        elif stage1_mode == "pooled_query_vs_experimental_pooling":
             prefetch_query = query_np.mean(axis=0).tolist()
             prefetch_using = self.experimental_vector_name
-        elif stage1_mode == "tokens_vs_experimental":
+        elif stage1_mode == "tokens_vs_experimental_pooling":
             prefetch_query = query_np.tolist()
             prefetch_using = self.experimental_vector_name
         elif stage1_mode == "pooled_query_vs_global":
@@ -188,7 +198,7 @@ class TwoStageRetriever:
         filter_obj=None,
         use_reranking: bool = True,
         return_embeddings: bool = False,
-        stage1_mode: str = "pooled_query_vs_tiles",
+        stage1_mode: str = "pooled_query_vs_standard_pooling",
     ) -> List[Dict[str, Any]]:
         """
         Two-stage retrieval: prefetch with pooling, rerank with MaxSim.
@@ -201,9 +211,11 @@ class TwoStageRetriever:
             use_reranking: Enable stage 2 reranking (default: True)
             return_embeddings: Include embeddings in results
             stage1_mode:
-                - "pooled_query_vs_tiles": pool query to 1×dim and search tile vectors (using="mean_pooling")
-                - "tokens_vs_tiles": search tile vectors with full query tokens (using="mean_pooling")
-                - "pooled_query_vs_global": pool query to 1×dim and search global pooled doc vectors (using="global_pooling")
+                - "pooled_query_vs_standard_pooling": pool query to 1×dim and search standard_pooling vectors (Qdrant named vector: "mean_pooling")
+                - "tokens_vs_standard_pooling": search standard_pooling vectors with full query tokens (Qdrant named vector: "mean_pooling")
+                - "pooled_query_vs_experimental_pooling": pool query to 1×dim and search experimental_pooling vectors (Qdrant named vector: "experimental_pooling")
+                - "tokens_vs_experimental_pooling": search experimental_pooling vectors with full query tokens (Qdrant named vector: "experimental_pooling")
+                - "pooled_query_vs_global": pool query to 1×dim and search global pooled doc vectors (Qdrant named vector: "global_pooling")
 
         Returns:
             List of results with scores and metadata:
@@ -318,7 +330,7 @@ class TwoStageRetriever:
         query_np: np.ndarray,
         top_k: int,
         filter_obj=None,
-        stage1_mode: str = "pooled_query_vs_tiles",
+        stage1_mode: str = "pooled_query_vs_standard_pooling",
     ) -> List[Dict[str, Any]]:
         """Stage 1: Prefetch candidates."""
         if stage1_mode == "pooled_query_vs_tiles":

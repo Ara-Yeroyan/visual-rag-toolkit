@@ -1,15 +1,15 @@
 import argparse
 import json
+import logging
 import os
 import time
-import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 
 from benchmarks.vidore_tatdqa_test.dataset_loader import load_vidore_dataset_auto
-from benchmarks.vidore_tatdqa_test.metrics import ndcg_at_k, mrr_at_k, recall_at_k
+from benchmarks.vidore_tatdqa_test.metrics import mrr_at_k, ndcg_at_k, recall_at_k
 from visual_rag import VisualEmbedder
 from visual_rag.retrieval import MultiVectorRetriever
 
@@ -23,6 +23,7 @@ def _maybe_load_dotenv() -> None:
         return
     if Path(".env").exists():
         load_dotenv(".env")
+
 
 def _torch_dtype_to_str(dtype) -> str:
     if dtype is None:
@@ -151,7 +152,9 @@ def _evaluate(
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", force=True)
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", force=True
+    )
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="vidore/tatdqa_test")
@@ -165,12 +168,25 @@ def main() -> None:
         help="Torch dtype for model weights (default: auto; inferred from collection vector dtype when possible).",
     )
     parser.add_argument("--top-k", type=int, default=10)
-    parser.add_argument("--mode", type=str, default="two_stage", choices=["single_full", "two_stage"])
+    parser.add_argument(
+        "--mode", type=str, default="two_stage", choices=["single_full", "two_stage"]
+    )
     parser.add_argument(
         "--stage1-mode",
         type=str,
-        default="tokens_vs_tiles",
-        choices=["pooled_query_vs_tiles", "tokens_vs_tiles", "pooled_query_vs_global"],
+        default="tokens_vs_standard_pooling",
+        choices=[
+            "pooled_query_vs_standard_pooling",
+            "tokens_vs_standard_pooling",
+            "pooled_query_vs_experimental_pooling",
+            "tokens_vs_experimental_pooling",
+            "pooled_query_vs_global",
+            # Backwards-compatible aliases
+            "pooled_query_vs_tiles",
+            "tokens_vs_tiles",
+            "pooled_query_vs_experimental",
+            "tokens_vs_experimental",
+        ],
     )
     parser.add_argument(
         "--prefetch-ks",
@@ -278,7 +294,9 @@ def main() -> None:
     if args.query_batch_size and args.query_batch_size > 0:
         texts = [q.text for q in queries]
         logger.info(f"Pre-embedding {len(texts)} queries (batch={args.query_batch_size})...")
-        q_tensors = embedder.embed_queries(texts, batch_size=args.query_batch_size, show_progress=True)
+        q_tensors = embedder.embed_queries(
+            texts, batch_size=args.query_batch_size, show_progress=True
+        )
         precomputed_query_embeddings = [t.detach().cpu().float().numpy() for t in q_tensors]
         try:
             import torch
@@ -317,7 +335,11 @@ def main() -> None:
                     "max_queries": args.max_queries,
                     "sample_queries": args.sample_queries,
                     "sample_strategy": args.sample_strategy if args.sample_queries else None,
-                    "sample_seed": args.sample_seed if args.sample_queries and args.sample_strategy == "random" else None,
+                    "sample_seed": (
+                        args.sample_seed
+                        if args.sample_queries and args.sample_strategy == "random"
+                        else None
+                    ),
                     "metrics": metrics,
                 },
                 f,
@@ -340,7 +362,10 @@ def main() -> None:
             max_queries=args.max_queries,
             precomputed_query_embeddings=precomputed_query_embeddings,
         )
-        out_path = out_dir / f"{protocol}__two_stage__{args.stage1_mode}__prefetch{k}__top{args.top_k}.json"
+        out_path = (
+            out_dir
+            / f"{protocol}__two_stage__{args.stage1_mode}__prefetch{k}__top{args.top_k}.json"
+        )
         with open(out_path, "w") as f:
             json.dump(
                 {
@@ -356,7 +381,11 @@ def main() -> None:
                     "max_queries": args.max_queries,
                     "sample_queries": args.sample_queries,
                     "sample_strategy": args.sample_strategy if args.sample_queries else None,
-                    "sample_seed": args.sample_seed if args.sample_queries and args.sample_strategy == "random" else None,
+                    "sample_seed": (
+                        args.sample_seed
+                        if args.sample_queries and args.sample_strategy == "random"
+                        else None
+                    ),
                     "metrics": metrics,
                 },
                 f,
@@ -368,5 +397,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import re
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 
@@ -28,6 +28,7 @@ def _as_str(x: Any) -> str:
 def _stable_uuid(text: str) -> str:
     hex_str = hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
     return f"{hex_str[:8]}-{hex_str[8:12]}-{hex_str[12:16]}-{hex_str[16:20]}-{hex_str[20:32]}"
+
 
 def paired_source_doc_id(row: Mapping[str, Any], idx: int) -> str:
     source_doc_id = _as_str(row.get("_id"))
@@ -55,13 +56,18 @@ def _normalize_qrels(qrels_rows: Iterable[Mapping[str, Any]]) -> Dict[str, Dict[
     qrels: Dict[str, Dict[str, int]] = {}
     for row in qrels_rows:
         qid = _as_str(row.get("query-id") or row.get("query_id") or row.get("qid"))
-        did = _as_str(row.get("corpus-id") or row.get("corpus_id") or row.get("doc_id") or row.get("did"))
+        did = _as_str(
+            row.get("corpus-id") or row.get("corpus_id") or row.get("doc_id") or row.get("did")
+        )
         score = row.get("score") or row.get("relevance") or row.get("label") or 0
         try:
             score_int = int(score)
         except Exception:
             score_int = 0
         if not qid or not did:
+            continue
+        # Keep qrels compact and correct: score<=0 is non-relevant.
+        if score_int <= 0:
             continue
         qrels.setdefault(qid, {})[_stable_uuid(did)] = score_int
     return qrels
@@ -70,7 +76,9 @@ def _normalize_qrels(qrels_rows: Iterable[Mapping[str, Any]]) -> Dict[str, Dict[
 def _expect_fields(obj: Any, required: List[str], context: str) -> None:
     missing = [k for k in required if k not in obj]
     if missing:
-        raise ValueError(f"{context}: missing required field(s): {missing}. Available: {list(obj.keys())}")
+        raise ValueError(
+            f"{context}: missing required field(s): {missing}. Available: {list(obj.keys())}"
+        )
 
 
 def _extract_beir_splits(ds: Any):
@@ -194,7 +202,9 @@ def _load_beir_from_separate_configs(dataset_name: str, config_names: List[str])
     return _first_split(corpus_ds), _first_split(queries_ds), _first_split(qrels_ds)
 
 
-def load_vidore_beir_dataset(dataset_name: str) -> Tuple[List[CorpusDoc], List[Query], Dict[str, Dict[str, int]]]:
+def load_vidore_beir_dataset(
+    dataset_name: str,
+) -> Tuple[List[CorpusDoc], List[Query], Dict[str, Dict[str, int]]]:
     try:
         from datasets import load_dataset
     except ImportError as e:
@@ -220,7 +230,6 @@ def load_vidore_beir_dataset(dataset_name: str) -> Tuple[List[CorpusDoc], List[Q
 
     last_err: Optional[Exception] = None
     extracted = None
-    used_name = None
     used_configs: List[str] = []
     for name_try in candidates:
         config_names = _get_config_names(name_try)
@@ -241,7 +250,6 @@ def load_vidore_beir_dataset(dataset_name: str) -> Tuple[List[CorpusDoc], List[Q
             if extracted is None:
                 extracted = _load_beir_from_separate_configs(name_try, config_names)
         if extracted is not None:
-            used_name = name_try
             break
 
     if extracted is None:
@@ -271,7 +279,9 @@ def load_vidore_beir_dataset(dataset_name: str) -> Tuple[List[CorpusDoc], List[Q
         doc_id = _stable_uuid(source_doc_id)
         image = row.get("image") or row.get("page_image") or row.get("document") or row.get("img")
         if image is None:
-            raise ValueError("corpus row: missing image field (tried image/page_image/document/img)")
+            raise ValueError(
+                "corpus row: missing image field (tried image/page_image/document/img)"
+            )
         payload = {
             **{
                 k: v
@@ -305,7 +315,9 @@ def load_vidore_beir_dataset(dataset_name: str) -> Tuple[List[CorpusDoc], List[Q
     return corpus_docs, queries, qrels
 
 
-def load_vidore_paired_dataset(dataset_name: str) -> Tuple[List[CorpusDoc], List[Query], Dict[str, Dict[str, int]]]:
+def load_vidore_paired_dataset(
+    dataset_name: str,
+) -> Tuple[List[CorpusDoc], List[Query], Dict[str, Dict[str, int]]]:
     """
     Load ViDoRe v1-style paired QA datasets.
 
@@ -347,7 +359,9 @@ def load_vidore_paired_dataset(dataset_name: str) -> Tuple[List[CorpusDoc], List
     return corpus_docs, queries, qrels
 
 
-def load_vidore_dataset_auto(dataset_name: str) -> Tuple[List[CorpusDoc], List[Query], Dict[str, Dict[str, int]], str]:
+def load_vidore_dataset_auto(
+    dataset_name: str,
+) -> Tuple[List[CorpusDoc], List[Query], Dict[str, Dict[str, int]], str]:
     """
     Auto-detect ViDoRe dataset format.
     Returns: (corpus, queries, qrels, protocol)
@@ -359,5 +373,3 @@ def load_vidore_dataset_auto(dataset_name: str) -> Tuple[List[CorpusDoc], List[Q
     except ValueError:
         corpus, queries, qrels = load_vidore_paired_dataset(dataset_name)
         return corpus, queries, qrels, "paired"
-
-

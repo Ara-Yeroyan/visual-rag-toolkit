@@ -75,14 +75,25 @@ class QdrantAdmin:
 
         conn = _resolve_qdrant_connection(url=url, api_key=api_key)
         grpc_port = _infer_grpc_port(conn.url) if prefer_grpc else None
-        self.client = QdrantClient(
-            url=conn.url,
-            api_key=conn.api_key,
-            prefer_grpc=bool(prefer_grpc),
-            grpc_port=grpc_port,
-            timeout=int(timeout),
-            check_compatibility=False,
-        )
+
+        def _make(use_grpc: bool):
+            return QdrantClient(
+                url=conn.url,
+                api_key=conn.api_key,
+                prefer_grpc=bool(use_grpc),
+                grpc_port=grpc_port if use_grpc else None,
+                timeout=int(timeout),
+                check_compatibility=False,
+            )
+
+        self.client = _make(bool(prefer_grpc))
+        if prefer_grpc:
+            # gRPC can fail in some environments (DNS, proxies, etc.).
+            # Fall back to REST for admin operations.
+            try:
+                _ = self.client.get_collections()
+            except Exception:
+                self.client = _make(False)
 
     def get_collection_info(self, *, collection_name: str) -> Dict[str, Any]:
         info = self.client.get_collection(collection_name)
@@ -216,6 +227,47 @@ class QdrantAdmin:
             collection_name=collection_name,
             hnsw_config={"on_disk": True},
             collection_params={"on_disk_payload": True},
+            timeout=timeout,
+        )
+
+        return self.get_collection_info(collection_name=collection_name)
+
+    def ensure_collection_all_in_ram(
+        self,
+        *,
+        collection_name: str,
+        timeout: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Best-effort configuration to keep vectors/indexes in RAM.
+
+        Ensures:
+        - All existing named vectors have on_disk=False and hnsw_config.on_disk=False
+        - Collection hnsw_config.on_disk=False
+        - Collection params.on_disk_payload=False
+
+        Note: This is configuration-level. Actual residency still depends on available RAM
+        and the OS page cache; Qdrant doesn't expose a "pin all vectors in RAM now" API.
+        """
+        collection_name = str(collection_name)
+        info = self.client.get_collection(collection_name)
+        vectors = {}
+        try:
+            existing = list((info.config.params.vectors or {}).keys())
+        except Exception:
+            existing = []
+        for vname in existing:
+            vectors[str(vname)] = {"on_disk": False, "hnsw_config": {"on_disk": False}}
+
+        if vectors:
+            self.modify_collection_vector_config(
+                collection_name=collection_name, vectors=vectors, timeout=timeout
+            )
+
+        self.modify_collection_config(
+            collection_name=collection_name,
+            hnsw_config={"on_disk": False},
+            collection_params={"on_disk_payload": False},
             timeout=timeout,
         )
 

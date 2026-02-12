@@ -4,13 +4,14 @@ import os
 import sys
 import tempfile
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from benchmarks.vidore_tatdqa_test.dataset_loader import load_vidore_beir_dataset
-from benchmarks.vidore_tatdqa_test.metrics import ndcg_at_k, mrr_at_k, recall_at_k
+from benchmarks.vidore_tatdqa_test.metrics import mrr_at_k, ndcg_at_k, recall_at_k
 from visual_rag import VisualEmbedder
 from visual_rag.indexing.cloudinary_uploader import CloudinaryUploader
 from visual_rag.indexing.qdrant_indexer import QdrantIndexer
@@ -83,14 +84,19 @@ def _parse_payload_indexes(values: List[str]) -> List[Dict[str, str]]:
     return indexes
 
 
-def _union_point_id(*, dataset_name: str, source_doc_id: str, union_namespace: Optional[str]) -> str:
+def _union_point_id(
+    *, dataset_name: str, source_doc_id: str, union_namespace: Optional[str]
+) -> str:
     ns = f"{union_namespace}::{dataset_name}" if union_namespace else dataset_name
     return _stable_uuid(f"{ns}::{source_doc_id}")
 
 
-def _filter_qrels(qrels: Dict[str, Dict[str, int]], query_ids: List[str]) -> Dict[str, Dict[str, int]]:
+def _filter_qrels(
+    qrels: Dict[str, Dict[str, int]], query_ids: List[str]
+) -> Dict[str, Dict[str, int]]:
     keep = set(query_ids)
     return {qid: rels for qid, rels in qrels.items() if qid in keep}
+
 
 def _failed_log_path(*, collection_name: str, dataset_name: str) -> Path:
     dir_name = _safe_filename(collection_name)
@@ -130,7 +136,7 @@ def _default_output_filename(*, args, datasets: List[str]) -> str:
     if str(args.mode) == "three_stage":
         parts.append("tokens_vs_global")
         parts.append(f"s1k{int(args.stage1_k)}")
-        parts.append("tokens_vs_experimental")
+        parts.append("tokens_vs_experimental_pooling")
         parts.append(f"s2k{int(args.stage2_k)}")
     parts.extend([topk_tag, scope_tag, ds_tag])
 
@@ -207,7 +213,9 @@ def _load_failed_union_ids(
     return out
 
 
-def _remove_failed_from_qrels(qrels: Dict[str, Dict[str, int]], failed_ids: set) -> Tuple[Dict[str, Dict[str, int]], int]:
+def _remove_failed_from_qrels(
+    qrels: Dict[str, Dict[str, int]], failed_ids: set
+) -> Tuple[Dict[str, Dict[str, int]], int]:
     removed = 0
     if not failed_ids:
         return qrels, 0
@@ -221,6 +229,45 @@ def _remove_failed_from_qrels(qrels: Dict[str, Dict[str, int]], failed_ids: set)
             new_rels[str(did)] = int(score)
         out[str(qid)] = new_rels
     return out, removed
+
+
+def _filter_failed_ids_to_missing(
+    *,
+    qdrant_client,
+    collection_name: str,
+    failed_ids: set,
+    timeout: int,
+    batch_size: int = 128,
+) -> set:
+    """
+    Failure logs are append-only and can contain historical IDs that may have been
+    successfully retried later. To avoid poisoning evaluation, keep only IDs that
+    are *still missing* in Qdrant.
+    """
+    failed_ids = set(str(x) for x in (failed_ids or set()) if x)
+    if not failed_ids:
+        return set()
+
+    missing = set()
+    ids_list = list(failed_ids)
+    for i in range(0, len(ids_list), int(batch_size)):
+        chunk = ids_list[i : i + int(batch_size)]
+        try:
+            recs = qdrant_client.retrieve(
+                collection_name=str(collection_name),
+                ids=chunk,
+                with_payload=False,
+                with_vectors=False,
+                timeout=int(timeout),
+            )
+            present = set(str(r.id) for r in (recs or []))
+            for cid in chunk:
+                if str(cid) not in present:
+                    missing.add(str(cid))
+        except Exception:
+            # If retrieve fails (e.g. transient network), be conservative: treat as missing.
+            missing.update(str(cid) for cid in chunk)
+    return missing
 
 
 def _evaluate(
@@ -283,11 +330,25 @@ def _evaluate(
     retrieve_k = max(100, top_k)
 
     query_texts = [q.text for q in queries]
-    query_embeddings = embedder.embed_queries(
-        query_texts,
-        batch_size=getattr(embedder, "batch_size", None),
-        show_progress=False,
-    )
+    embed_started_at = time.time()
+    print(f"📝 Embedding {len(query_texts)} queries…")
+    sys.stdout.flush()
+    # Always try to show a progress bar during query embedding.
+    # If the installed VisualEmbedder version doesn't support show_progress, fall back gracefully.
+    try:
+        query_embeddings = embedder.embed_queries(
+            query_texts,
+            batch_size=getattr(embedder, "batch_size", None),
+            show_progress=True,
+        )
+    except TypeError:
+        query_embeddings = embedder.embed_queries(
+            query_texts,
+            batch_size=getattr(embedder, "batch_size", None),
+        )
+    embed_s = float(max(time.time() - embed_started_at, 0.0))
+    print(f"✅ Embedded queries in {embed_s:.2f}s")
+    sys.stdout.flush()
 
     iterator = queries
     try:
@@ -304,7 +365,10 @@ def _evaluate(
         except ImportError:
             torch = None
         if torch is not None and isinstance(qemb, torch.Tensor):
-            qemb_np = qemb.detach().cpu().numpy()
+            # Keep evaluation stable across dtypes/devices:
+            # - numpy doesn't support bfloat16
+            # - float16 queries can cause large quality drops on some backends
+            qemb_np = qemb.detach().float().cpu().numpy()
         else:
             qemb_np = qemb.numpy()
 
@@ -361,6 +425,41 @@ def _evaluate(
     }
 
 
+def _detect_collection_vector_dtype(*, client, collection_name: str) -> Optional[str]:
+    """
+    Best-effort detection of the stored vector datatype for a Qdrant collection.
+
+    Returns:
+        "float16", "float32", or None if unavailable.
+    """
+    try:
+        info = client.get_collection(str(collection_name))
+    except Exception:
+        return None
+
+    try:
+        vectors = info.config.params.vectors or {}
+    except Exception:
+        vectors = {}
+
+    vp = None
+    if isinstance(vectors, dict):
+        vp = vectors.get("initial") or (next(iter(vectors.values())) if vectors else None)
+    if vp is None:
+        return None
+
+    dt = getattr(vp, "datatype", None)
+    if dt is None:
+        return None
+
+    s = str(dt).lower()
+    if "float16" in s:
+        return "float16"
+    if "float32" in s:
+        return "float32"
+    return None
+
+
 def _write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
@@ -415,12 +514,15 @@ def _index_beir_corpus(
     crop_empty_remove_page_number: bool,
     crop_empty_preserve_border_px: int,
     crop_empty_uniform_std_threshold: float,
+    max_mean_pool_vectors: Optional[int],
     no_cloudinary: bool,
     cloudinary_folder: str,
     retry_failures: bool,
     only_failures: bool,
 ) -> None:
-    qdrant_url = os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL")
+    qdrant_url = (
+        os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL")
+    )
     if not qdrant_url:
         raise ValueError("QDRANT_URL not set")
     qdrant_api_key = (
@@ -453,7 +555,9 @@ def _index_beir_corpus(
             cloudinary_uploader = None
 
     failure_log = _failed_log_path(collection_name=collection_name, dataset_name=dataset_name)
-    failed_ids = _load_failed_union_ids(failure_log, dataset_name=dataset_name, union_namespace=union_namespace)
+    failed_ids = _load_failed_union_ids(
+        failure_log, dataset_name=dataset_name, union_namespace=union_namespace
+    )
     previously_failed_ids = set(failed_ids)
 
     existing_ids = set()
@@ -520,6 +624,7 @@ def _index_beir_corpus(
         out = img.copy()
         out.thumbnail((1024, 1024), Image.BICUBIC)
         return out
+
     uploaded_docs = 0
     skipped_docs = 0
     start_time = time.time()
@@ -536,14 +641,24 @@ def _index_beir_corpus(
         pass
 
     import threading
-    from concurrent.futures import ThreadPoolExecutor, wait as futures_wait, FIRST_EXCEPTION
+    from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor
+    from concurrent.futures import wait as futures_wait
 
     stop_event = threading.Event()
-    executor = ThreadPoolExecutor(max_workers=int(upload_workers)) if upload_workers and upload_workers > 0 else None
+    executor = (
+        ThreadPoolExecutor(max_workers=int(upload_workers))
+        if upload_workers and upload_workers > 0
+        else None
+    )
     futures = []
 
     def _upload(points: List[Dict[str, Any]]) -> int:
-        uploaded = int(indexer.upload_batch(points, delay_between_batches=0.0, wait=upsert_wait, stop_event=stop_event) or 0)
+        uploaded = int(
+            indexer.upload_batch(
+                points, delay_between_batches=0.0, wait=upsert_wait, stop_event=stop_event
+            )
+            or 0
+        )
         if uploaded <= 0 and points:
             for p in points:
                 pid = str(p.get("id") or "")
@@ -554,7 +669,9 @@ def _index_beir_corpus(
                             "dataset": dataset_name,
                             "collection": collection_name,
                             "model": model_name,
-                            "source_doc_id": str((p.get("metadata") or {}).get("source_doc_id") or ""),
+                            "source_doc_id": str(
+                                (p.get("metadata") or {}).get("source_doc_id") or ""
+                            ),
                             "doc_id": str((p.get("metadata") or {}).get("doc_id") or ""),
                             "union_doc_id": pid,
                             "error": "Qdrant upsert failed (all retries exhausted)",
@@ -632,7 +749,8 @@ def _index_beir_corpus(
                 continue
 
             if crop_empty:
-                from visual_rag.preprocessing.crop_empty import CropEmptyConfig, crop_empty as _crop_empty
+                from visual_rag.preprocessing.crop_empty import CropEmptyConfig
+                from visual_rag.preprocessing.crop_empty import crop_empty as _crop_empty
 
                 crop_cfg = CropEmptyConfig(
                     percentage_to_remove=float(crop_empty_percentage_to_remove),
@@ -660,7 +778,7 @@ def _index_beir_corpus(
                     return_token_info=True,
                     show_progress=False,
                 )
-            except Exception as e:
+            except Exception:
                 # Retry per-doc to isolate flaky backend / corrupted sample issues.
                 embeddings = []
                 token_infos = []
@@ -675,7 +793,9 @@ def _index_beir_corpus(
                         embeddings.append(e1[0])
                         token_infos.append(t1[0])
                     except Exception as e_single:
-                        source_doc_id_i = str((doc_i.payload or {}).get("source_doc_id") or doc_i.doc_id)
+                        source_doc_id_i = str(
+                            (doc_i.payload or {}).get("source_doc_id") or doc_i.doc_id
+                        )
                         union_doc_id_i = _union_point_id(
                             dataset_name=dataset_name,
                             source_doc_id=source_doc_id_i,
@@ -704,43 +824,6 @@ def _index_beir_corpus(
             for doc, emb, token_info, crop_meta, original_img, embed_img in zip(
                 batch, embeddings, token_infos, crop_metas, original_images, images
             ):
-                try:
-                    emb_np = emb.cpu().float().numpy() if hasattr(emb, "cpu") else np.array(emb, dtype=np.float32)
-                    visual_indices = token_info.get("visual_token_indices") or list(range(emb_np.shape[0]))
-                    visual_embedding = emb_np[visual_indices].astype(np.float32)
-                    tile_pooled = embedder.mean_pool_visual_embedding(visual_embedding, token_info, target_vectors=32)
-                    experimental_pooled = embedder.experimental_pool_visual_embedding(
-                        visual_embedding, token_info, target_vectors=32, mean_pool=tile_pooled
-                    )
-                    global_pooled = embedder.global_pool_from_mean_pool(tile_pooled)
-                except Exception as e_single:
-                    source_doc_id_i = str((doc.payload or {}).get("source_doc_id") or doc.doc_id)
-                    union_doc_id_i = _union_point_id(
-                        dataset_name=dataset_name,
-                        source_doc_id=source_doc_id_i,
-                        union_namespace=union_namespace,
-                    )
-                    if str(union_doc_id_i) not in failed_ids:
-                        _append_jsonl(
-                            failure_log,
-                            {
-                                "dataset": dataset_name,
-                                "collection": collection_name,
-                                "model": model_name,
-                                "source_doc_id": str(source_doc_id_i),
-                                "doc_id": str(getattr(doc, "doc_id", "")),
-                                "union_doc_id": str(union_doc_id_i),
-                                "error": str(e_single),
-                            },
-                        )
-                        failed_ids.add(str(union_doc_id_i))
-                    existing_ids.add(str(union_doc_id_i))
-                    skipped_docs += 1
-                    continue
-
-                num_tiles = int(tile_pooled.shape[0])
-                patches_per_tile = int(visual_embedding.shape[0] // max(num_tiles, 1)) if num_tiles else 0
-
                 source_doc_id = str((doc.payload or {}).get("source_doc_id") or doc.doc_id)
                 union_doc_id = _union_point_id(
                     dataset_name=dataset_name,
@@ -748,19 +831,100 @@ def _index_beir_corpus(
                     union_namespace=union_namespace,
                 )
 
+                try:
+                    emb_np = (
+                        emb.cpu().float().numpy()
+                        if hasattr(emb, "cpu")
+                        else np.array(emb, dtype=np.float32)
+                    )
+                    visual_indices = token_info.get("visual_token_indices") or list(
+                        range(emb_np.shape[0])
+                    )
+                    visual_embedding = emb_np[visual_indices].astype(np.float32)
+                    tile_pooled = embedder.mean_pool_visual_embedding(
+                        visual_embedding, token_info, target_vectors=max_mean_pool_vectors
+                    )
+                    experimental_pooled = embedder.experimental_pool_visual_embedding(
+                        visual_embedding,
+                        token_info,
+                        target_vectors=max_mean_pool_vectors,
+                        mean_pool=tile_pooled,
+                    )
+                    global_pooled = embedder.global_pool_from_mean_pool(tile_pooled)
+
+                    # Log whenever ColQwen2.5 adaptive mean pooling actually downsamples rows.
+                    model_lower = (model_name or "").lower()
+                    is_colqwen25 = "colqwen2.5" in model_lower or "colqwen2_5" in model_lower
+                    if is_colqwen25:
+                        grid_h_eff = (token_info or {}).get("grid_h_eff")
+                        if grid_h_eff is not None:
+                            try:
+                                h_eff = int(grid_h_eff)
+                                out_rows = int(getattr(tile_pooled, "shape", [0])[0])
+                            except Exception:
+                                h_eff = 0
+                                out_rows = 0
+                            if h_eff > 0 and out_rows > 0 and out_rows < h_eff:
+                                msg = (
+                                    "Downsampled ColQwen mean-pool rows for "
+                                    f"union_doc_id={union_doc_id} (source_doc_id={source_doc_id}): "
+                                    f"grid_h_eff={h_eff} -> {out_rows} "
+                                    f"(--max-mean-pool-vectors={max_mean_pool_vectors})"
+                                )
+                                if pbar is not None:
+                                    try:
+                                        pbar.write(msg)
+                                    except Exception:
+                                        print(msg)
+                                else:
+                                    print(msg)
+                except Exception as e_single:
+                    if str(union_doc_id) not in failed_ids:
+                        _append_jsonl(
+                            failure_log,
+                            {
+                                "dataset": dataset_name,
+                                "collection": collection_name,
+                                "model": model_name,
+                                "source_doc_id": str(source_doc_id),
+                                "doc_id": str(getattr(doc, "doc_id", "")),
+                                "union_doc_id": str(union_doc_id),
+                                "error": str(e_single),
+                            },
+                        )
+                        failed_ids.add(str(union_doc_id))
+                    existing_ids.add(str(union_doc_id))
+                    skipped_docs += 1
+                    continue
+
+                num_tiles = int(tile_pooled.shape[0])
+                patches_per_tile = (
+                    int(visual_embedding.shape[0] // max(num_tiles, 1)) if num_tiles else 0
+                )
+
                 resized_img = _resized_for_display(embed_img) or embed_img
                 original_url = ""
                 cropped_url = ""
                 resized_url = ""
-                if cloudinary_uploader is not None and original_img is not None and resized_img is not None:
+                if (
+                    cloudinary_uploader is not None
+                    and original_img is not None
+                    and resized_img is not None
+                ):
                     base_public_id = _safe_public_id(f"{dataset_name}__{union_doc_id}")
                     try:
                         if crop_empty:
-                            o_url, c_url, r_url = cloudinary_uploader.upload_original_cropped_and_resized(
-                                original_img,
-                                embed_img if embed_img is not None and embed_img is not original_img else None,
-                                resized_img,
-                                base_public_id,
+                            o_url, c_url, r_url = (
+                                cloudinary_uploader.upload_original_cropped_and_resized(
+                                    original_img,
+                                    (
+                                        embed_img
+                                        if embed_img is not None and embed_img is not original_img
+                                        else None
+                                    ),
+                                    resized_img,
+                                    base_public_id,
+                                )
                             )
                             original_url = o_url or ""
                             cropped_url = c_url or ""
@@ -782,12 +946,18 @@ def _index_beir_corpus(
                     "union_doc_id": union_doc_id,
                     "page": resized_url or original_url or "",
                     "original_url": original_url,
-                    "cropped_url": cropped_url,
+                    "cropped_url": cropped_url if crop_empty else "",
                     "resized_url": resized_url,
                     "original_width": int(original_img.width) if original_img is not None else None,
-                    "original_height": int(original_img.height) if original_img is not None else None,
-                    "cropped_width": int(embed_img.width) if embed_img is not None else None,
-                    "cropped_height": int(embed_img.height) if embed_img is not None else None,
+                    "original_height": (
+                        int(original_img.height) if original_img is not None else None
+                    ),
+                    "cropped_width": (
+                        int(embed_img.width) if (crop_empty and embed_img is not None) else None
+                    ),
+                    "cropped_height": (
+                        int(embed_img.height) if (crop_empty and embed_img is not None) else None
+                    ),
                     "resized_width": int(resized_img.width) if resized_img is not None else None,
                     "resized_height": int(resized_img.height) if resized_img is not None else None,
                     "num_tiles": int(num_tiles),
@@ -795,15 +965,25 @@ def _index_beir_corpus(
                     "torch_dtype": _torch_dtype_to_str(embedder.torch_dtype),
                     "model_name": model_name,
                     "crop_empty_enabled": bool(crop_empty),
-                    "crop_empty_crop_box": (crop_meta or {}).get("crop_box") if crop_empty else None,
-                    "crop_empty_remove_page_number": bool(crop_empty_remove_page_number) if crop_empty else None,
-                    "crop_empty_percentage_to_remove": float(crop_empty_percentage_to_remove) if crop_empty else None,
+                    "crop_empty_crop_box": (
+                        (crop_meta or {}).get("crop_box") if crop_empty else None
+                    ),
+                    "crop_empty_remove_page_number": (
+                        bool(crop_empty_remove_page_number) if crop_empty else None
+                    ),
+                    "crop_empty_percentage_to_remove": (
+                        float(crop_empty_percentage_to_remove) if crop_empty else None
+                    ),
                     "index_recovery_previously_failed": bool(union_doc_id in previously_failed_ids),
                     "index_recovery_mode": (
-                        "only_failures" if bool(only_failures) else ("retry_failures" if bool(retry_failures) else None)
+                        "only_failures"
+                        if bool(only_failures)
+                        else ("retry_failures" if bool(retry_failures) else None)
                     ),
                     "index_recovery_pooling_inferred_tiles": bool(
-                        (token_info or {}).get("num_tiles") is None and (token_info or {}).get("n_rows") is None and (token_info or {}).get("n_cols") is None
+                        (token_info or {}).get("num_tiles") is None
+                        and (token_info or {}).get("n_rows") is None
+                        and (token_info or {}).get("n_cols") is None
                     ),
                     "index_recovery_num_visual_tokens": int(visual_embedding.shape[0]),
                     **(doc.payload or {}),
@@ -894,8 +1074,8 @@ def main() -> None:
     parser.add_argument(
         "--qdrant-vector-dtype",
         type=str,
-        default="float16",
-        choices=["float16", "float32"],
+        default="auto",
+        choices=["auto", "float16", "float32"],
     )
     grpc_group = parser.add_mutually_exclusive_group()
     grpc_group.add_argument("--prefer-grpc", dest="prefer_grpc", action="store_true", default=True)
@@ -910,10 +1090,14 @@ def main() -> None:
     parser.add_argument("--upsert-wait", action="store_true")
     parser.add_argument("--max-corpus-docs", type=int, default=0)
     parser.add_argument("--sample-corpus-docs", type=int, default=0)
-    parser.add_argument("--sample-corpus-strategy", type=str, default="first", choices=["first", "random"])
+    parser.add_argument(
+        "--sample-corpus-strategy", type=str, default="first", choices=["first", "random"]
+    )
     parser.add_argument("--sample-seed", type=int, default=0)
     parser.add_argument("--sample-queries", type=int, default=0)
-    parser.add_argument("--sample-query-strategy", type=str, default="first", choices=["first", "random"])
+    parser.add_argument(
+        "--sample-query-strategy", type=str, default="first", choices=["first", "random"]
+    )
     parser.add_argument("--sample-query-seed", type=int, default=0)
     parser.add_argument("--index-from-queries", action="store_true", default=False)
     parser.add_argument("--resume", action="store_true", default=False)
@@ -925,14 +1109,35 @@ def main() -> None:
     parser.add_argument("--crop-empty-remove-page-number", action="store_true", default=False)
     parser.add_argument("--crop-empty-preserve-border-px", type=int, default=1)
     parser.add_argument("--crop-empty-uniform-std-threshold", type=float, default=0.0)
+    parser.add_argument(
+        "--max-mean-pool-vectors",
+        type=int,
+        default=None,
+        help=(
+            "Cap ColQwen2.5 adaptive row-mean pooling to at most this many vectors. "
+            "If omitted (default), no cap is applied (use all effective rows). "
+            "If <= 0, treated as no cap."
+        ),
+    )
     payload_group = parser.add_mutually_exclusive_group()
     payload_group.add_argument("--index-common-metadata", action="store_true", default=True)
-    payload_group.add_argument("--no-index-common-metadata", dest="index_common_metadata", action="store_false")
+    payload_group.add_argument(
+        "--no-index-common-metadata", dest="index_common_metadata", action="store_false"
+    )
     parser.add_argument("--payload-index", action="append", default=[])
-    parser.add_argument(
+    cloud_group = parser.add_mutually_exclusive_group()
+    cloud_group.add_argument(
+        "--cloudinary",
+        dest="no_cloudinary",
+        action="store_false",
+        default=True,
+        help="Enable Cloudinary uploads during indexing (default: disabled).",
+    )
+    cloud_group.add_argument(
         "--no-cloudinary",
+        dest="no_cloudinary",
         action="store_true",
-        help="Disable Cloudinary uploads during indexing (default: enabled).",
+        help="Disable Cloudinary uploads during indexing (default).",
     )
     parser.add_argument(
         "--cloudinary-folder",
@@ -953,8 +1158,18 @@ def main() -> None:
         help="Index only documents listed in index_failures__<collection>__<dataset>.jsonl.",
     )
 
-    parser.add_argument("--top-k", type=int, default=100, help="Retrieve top-k results (default: 100 to calculate metrics at all cutoffs)")
-    parser.add_argument("--prefetch-k", type=int, default=200, help="Prefetch candidates for two-stage (default: 200)")
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=100,
+        help="Retrieve top-k results (default: 100 to calculate metrics at all cutoffs)",
+    )
+    parser.add_argument(
+        "--prefetch-k",
+        type=int,
+        default=200,
+        help="Prefetch candidates for two-stage (default: 200)",
+    )
     parser.add_argument(
         "--no-eval",
         action="store_true",
@@ -970,21 +1185,41 @@ def main() -> None:
     parser.add_argument(
         "--stage1-mode",
         type=str,
-        default="tokens_vs_tiles",
+        default="tokens_vs_standard_pooling",
         choices=[
+            # New naming (preferred)
+            "pooled_query_vs_standard_pooling",
+            "tokens_vs_standard_pooling",
+            "pooled_query_vs_experimental_pooling",
+            "tokens_vs_experimental_pooling",
+            "pooled_query_vs_global",
+            # Backwards-compatible aliases (deprecated)
             "pooled_query_vs_tiles",
             "tokens_vs_tiles",
             "pooled_query_vs_experimental",
             "tokens_vs_experimental",
-            "pooled_query_vs_global",
         ],
+        help=(
+            "Two-stage stage1 prefetch mode. "
+            "standard_pooling uses Qdrant named vector 'mean_pooling'. "
+            "experimental_pooling uses Qdrant named vector 'experimental_pooling'. "
+            "global uses Qdrant named vector 'global_pooling'."
+        ),
     )
-    parser.add_argument("--stage1-k", type=int, default=1000, help="Three-stage stage1 top_k (default: 1000)")
-    parser.add_argument("--stage2-k", type=int, default=300, help="Three-stage stage2 top_k (default: 300)")
+    parser.add_argument(
+        "--stage1-k", type=int, default=1000, help="Three-stage stage1 top_k (default: 1000)"
+    )
+    parser.add_argument(
+        "--stage2-k", type=int, default=300, help="Three-stage stage2 top_k (default: 300)"
+    )
     parser.add_argument("--max-queries", type=int, default=0)
     drop_group = parser.add_mutually_exclusive_group()
-    drop_group.add_argument("--drop-empty-queries", dest="drop_empty_queries", action="store_true", default=True)
-    drop_group.add_argument("--no-drop-empty-queries", dest="drop_empty_queries", action="store_false")
+    drop_group.add_argument(
+        "--drop-empty-queries", dest="drop_empty_queries", action="store_true", default=True
+    )
+    drop_group.add_argument(
+        "--no-drop-empty-queries", dest="drop_empty_queries", action="store_false"
+    )
     parser.add_argument(
         "--evaluation-scope",
         type=str,
@@ -1008,25 +1243,60 @@ def main() -> None:
         help="Stop the run immediately on the first dataset evaluation failure.",
     )
     parser.add_argument("--output", type=str, default="auto")
+    parser.add_argument(
+        "--ensure-in-ram",
+        dest="ensure_in_ram",
+        action="store_true",
+        default=False,
+        help="Best-effort: patch collection config so vectors/indexes are stored in RAM (on_disk=false).",
+    )
 
     args = parser.parse_args()
+
+    # Backwards-compatible stage1_mode mapping (deprecated names)
+    stage1_map = {
+        "pooled_query_vs_tiles": "pooled_query_vs_standard_pooling",
+        "tokens_vs_tiles": "tokens_vs_standard_pooling",
+        "pooled_query_vs_experimental": "pooled_query_vs_experimental_pooling",
+        "tokens_vs_experimental": "tokens_vs_experimental_pooling",
+    }
+    if str(args.stage1_mode) in stage1_map:
+        old = str(args.stage1_mode)
+        new = stage1_map[old]
+        warnings.warn(
+            f"--stage1-mode {old} is deprecated; use {new} instead.",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
+        args.stage1_mode = new
 
     _maybe_load_dotenv()
 
     if args.recreate:
         args.index = True
 
-    if args.sample_corpus_docs and int(args.sample_corpus_docs) > 0 and args.max_corpus_docs and int(args.max_corpus_docs) > 0:
+    if (
+        args.sample_corpus_docs
+        and int(args.sample_corpus_docs) > 0
+        and args.max_corpus_docs
+        and int(args.max_corpus_docs) > 0
+    ):
         raise ValueError("Use only one of --sample-corpus-docs or --max-corpus-docs (not both).")
     if args.sample_queries and int(args.sample_queries) > 0 and args.index_from_queries:
-        if (args.sample_corpus_docs and int(args.sample_corpus_docs) > 0) or (args.max_corpus_docs and int(args.max_corpus_docs) > 0):
-            raise ValueError("Use --index-from-queries with --sample-queries only (do not combine with corpus sampling).")
+        if (args.sample_corpus_docs and int(args.sample_corpus_docs) > 0) or (
+            args.max_corpus_docs and int(args.max_corpus_docs) > 0
+        ):
+            raise ValueError(
+                "Use --index-from-queries with --sample-queries only (do not combine with corpus sampling)."
+            )
 
     if args.upsert_wait:
         print("Qdrant upserts wait for completion (wait=True).")
     else:
         print("Qdrant upserts are async (wait=False).")
-    print(f"Qdrant request timeout: {int(args.qdrant_timeout)}s, retries: {int(args.qdrant_retries)}.")
+    print(
+        f"Qdrant request timeout: {int(args.qdrant_timeout)}s, retries: {int(args.qdrant_retries)}."
+    )
 
     datasets: List[str] = []
     if args.datasets:
@@ -1044,7 +1314,46 @@ def main() -> None:
         corpus, queries, qrels = load_vidore_beir_dataset(ds_name)
         loaded.append((ds_name, corpus, queries, qrels))
 
-    output_dtype = np.float16 if args.qdrant_vector_dtype == "float16" else np.float32
+    # Resolve the dtype used for query embeddings:
+    # - If user sets float16/float32 explicitly, respect it.
+    # - If auto: try to detect from the existing Qdrant collection (prevents silent score drops),
+    #            otherwise fall back to float16 (preserves legacy default for new collections).
+    effective_qdrant_vector_dtype = str(args.qdrant_vector_dtype)
+    if effective_qdrant_vector_dtype == "auto":
+        qdrant_url = (
+            os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL")
+        )
+        qdrant_api_key = (
+            os.getenv("SIGIR_QDRANT_KEY")
+            or os.getenv("SIGIR_QDRANT_API_KEY")
+            or os.getenv("DEST_QDRANT_API_KEY")
+            or os.getenv("QDRANT_API_KEY")
+        )
+        detected = None
+        if qdrant_url:
+            try:
+                from qdrant_client import QdrantClient
+
+                client = QdrantClient(
+                    url=qdrant_url,
+                    api_key=qdrant_api_key,
+                    prefer_grpc=bool(args.prefer_grpc),
+                    timeout=int(args.qdrant_timeout),
+                    check_compatibility=False,
+                )
+                detected = _detect_collection_vector_dtype(
+                    client=client, collection_name=str(args.collection)
+                )
+            except Exception:
+                detected = None
+        effective_qdrant_vector_dtype = detected or "float16"
+        if detected:
+            print(f"🔎 Detected Qdrant vector dtype for collection: {detected}")
+        else:
+            print("🔎 Could not detect Qdrant vector dtype; defaulting to float16")
+        sys.stdout.flush()
+
+    output_dtype = np.float16 if effective_qdrant_vector_dtype == "float16" else np.float32
     embedder = VisualEmbedder(
         model_name=args.model,
         batch_size=args.batch_size,
@@ -1105,9 +1414,6 @@ def main() -> None:
                     {"field": "original_height", "type": "integer"},
                     {"field": "resized_width", "type": "integer"},
                     {"field": "resized_height", "type": "integer"},
-                    {"field": "crop_empty_enabled", "type": "bool"},
-                    {"field": "crop_empty_remove_page_number", "type": "bool"},
-                    {"field": "crop_empty_percentage_to_remove", "type": "float"},
                     {"field": "num_tiles", "type": "integer"},
                     {"field": "tile_rows", "type": "integer"},
                     {"field": "tile_cols", "type": "integer"},
@@ -1118,6 +1424,28 @@ def main() -> None:
                     {"field": "source", "type": "keyword"},
                 ]
             )
+            # Keep schema minimal: only add crop-related indexes when cropping is enabled.
+            if bool(args.crop_empty):
+                payload_indexes.extend(
+                    [
+                        {"field": "crop_empty_enabled", "type": "bool"},
+                        {"field": "crop_empty_remove_page_number", "type": "bool"},
+                        {"field": "crop_empty_percentage_to_remove", "type": "float"},
+                        {"field": "cropped_url", "type": "keyword"},
+                        {"field": "cropped_width", "type": "integer"},
+                        {"field": "cropped_height", "type": "integer"},
+                    ]
+                )
+        # If we are recreating the collection, clear historical failure logs so they don't
+        # remove valid qrels during evaluation.
+        if bool(args.recreate):
+            for ds_name, _corpus, _queries, _qrels in selected:
+                p = _failed_log_path(collection_name=args.collection, dataset_name=ds_name)
+                try:
+                    if p.exists():
+                        p.unlink()
+                except Exception:
+                    pass
         for i, (ds_name, corpus, queries, _qrels) in enumerate(selected):
             print(f"Indexing {ds_name}: corpus_docs={len(corpus)} queries={len(queries)}")
             _index_beir_corpus(
@@ -1126,7 +1454,7 @@ def main() -> None:
                 embedder=embedder,
                 collection_name=args.collection,
                 prefer_grpc=args.prefer_grpc,
-                qdrant_vector_dtype=args.qdrant_vector_dtype,
+                qdrant_vector_dtype=effective_qdrant_vector_dtype,
                 recreate=bool(args.recreate and i == 0),
                 indexing_threshold=args.indexing_threshold,
                 batch_size=args.batch_size,
@@ -1148,6 +1476,7 @@ def main() -> None:
                 crop_empty_remove_page_number=bool(args.crop_empty_remove_page_number),
                 crop_empty_preserve_border_px=int(args.crop_empty_preserve_border_px),
                 crop_empty_uniform_std_threshold=float(args.crop_empty_uniform_std_threshold),
+                max_mean_pool_vectors=args.max_mean_pool_vectors,
                 no_cloudinary=bool(args.no_cloudinary),
                 cloudinary_folder=str(args.cloudinary_folder),
                 retry_failures=bool(args.retry_failures),
@@ -1160,9 +1489,15 @@ def main() -> None:
         dataset_index_failures: Dict[str, Dict[str, Any]] = {}
         dataset_counts: Dict[str, Dict[str, int]] = {}
         for ds_name, corpus, queries, _qrels in selected:
-            dataset_counts[ds_name] = {"corpus_docs": int(len(corpus)), "queries": int(len(queries)), "queries_eval": 0}
+            dataset_counts[ds_name] = {
+                "corpus_docs": int(len(corpus)),
+                "queries": int(len(queries)),
+                "queries_eval": 0,
+            }
             failed_path = _failed_log_path(collection_name=args.collection, dataset_name=ds_name)
-            failed_ids = _load_failed_union_ids(failed_path, dataset_name=ds_name, union_namespace=args.collection)
+            failed_ids = _load_failed_union_ids(
+                failed_path, dataset_name=ds_name, union_namespace=args.collection
+            )
             dataset_index_failures[ds_name] = {
                 "failed_log_path": str(failed_path),
                 "failed_ids_count": int(len(failed_ids)),
@@ -1178,7 +1513,7 @@ def main() -> None:
                 "collection": args.collection,
                 "model": args.model,
                 "torch_dtype": _torch_dtype_to_str(embedder.torch_dtype),
-                "qdrant_vector_dtype": args.qdrant_vector_dtype,
+                "qdrant_vector_dtype": effective_qdrant_vector_dtype,
                 "mode": args.mode,
                 "stage1_mode": args.stage1_mode if args.mode == "two_stage" else None,
                 "prefetch_k": args.prefetch_k if args.mode == "two_stage" else None,
@@ -1200,10 +1535,45 @@ def main() -> None:
         print(f"Wrote index-only report: {out_path}")
         return
 
+    if bool(args.ensure_in_ram):
+        try:
+            from visual_rag.qdrant_admin import QdrantAdmin
+
+            qdrant_url = (
+                os.getenv("SIGIR_QDRANT_URL")
+                or os.getenv("DEST_QDRANT_URL")
+                or os.getenv("QDRANT_URL")
+            )
+            qdrant_api_key = (
+                os.getenv("SIGIR_QDRANT_KEY")
+                or os.getenv("SIGIR_QDRANT_API_KEY")
+                or os.getenv("DEST_QDRANT_API_KEY")
+                or os.getenv("QDRANT_API_KEY")
+            )
+            admin = QdrantAdmin(
+                url=qdrant_url,
+                api_key=qdrant_api_key,
+                prefer_grpc=bool(args.prefer_grpc),
+                timeout=int(args.qdrant_timeout),
+            )
+            print(f"🧠 Ensuring collection in RAM (config): {args.collection}")
+            sys.stdout.flush()
+            _ = admin.ensure_collection_all_in_ram(
+                collection_name=str(args.collection),
+                timeout=int(args.qdrant_timeout),
+            )
+            print("✅ ensure-in-ram config applied")
+            sys.stdout.flush()
+        except Exception as e:
+            print(f"⚠️ ensure-in-ram failed: {type(e).__name__}: {e}")
+            sys.stdout.flush()
+
     retriever = MultiVectorRetriever(
         collection_name=args.collection,
         embedder=embedder,
-        qdrant_url=os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL"),
+        qdrant_url=os.getenv("SIGIR_QDRANT_URL")
+        or os.getenv("DEST_QDRANT_URL")
+        or os.getenv("QDRANT_URL"),
         qdrant_api_key=(
             os.getenv("SIGIR_QDRANT_KEY")
             or os.getenv("SIGIR_QDRANT_API_KEY")
@@ -1234,7 +1604,7 @@ def main() -> None:
             "collection": args.collection,
             "model": args.model,
             "torch_dtype": _torch_dtype_to_str(embedder.torch_dtype),
-            "qdrant_vector_dtype": args.qdrant_vector_dtype,
+            "qdrant_vector_dtype": effective_qdrant_vector_dtype,
             "mode": args.mode,
             "stage1_mode": args.stage1_mode if args.mode == "two_stage" else None,
             "prefetch_k": args.prefetch_k if args.mode == "two_stage" else None,
@@ -1271,13 +1641,25 @@ def main() -> None:
             f"(corpus_docs={len(corpus)}, queries={len(queries)}) "
             f"scope={args.evaluation_scope} "
             f"mode={args.mode}"
-            + (f", stage1_mode={args.stage1_mode}, prefetch_k={int(args.prefetch_k)}" if args.mode == "two_stage" else "")
-            + (f", stage1_k={int(args.stage1_k)}, stage2_k={int(args.stage2_k)}" if args.mode == "three_stage" else "")
+            + (
+                f", stage1_mode={args.stage1_mode}, prefetch_k={int(args.prefetch_k)}"
+                if args.mode == "two_stage"
+                else ""
+            )
+            + (
+                f", stage1_k={int(args.stage1_k)}, stage2_k={int(args.stage2_k)}"
+                if args.mode == "three_stage"
+                else ""
+            )
             + f", top_k={int(args.top_k)}"
         )
         sys.stdout.flush()
 
-        dataset_counts[ds_name] = {"corpus_docs": int(len(corpus)), "queries": int(len(queries)), "queries_eval": 0}
+        dataset_counts[ds_name] = {
+            "corpus_docs": int(len(corpus)),
+            "queries": int(len(queries)),
+            "queries_eval": 0,
+        }
         id_map: Dict[str, str] = {}
         for doc in corpus:
             source_doc_id = str((doc.payload or {}).get("source_doc_id") or doc.doc_id)
@@ -1298,11 +1680,21 @@ def main() -> None:
                 remapped_qrels[qid] = out_rels
 
         failed_path = _failed_log_path(collection_name=args.collection, dataset_name=ds_name)
-        failed_ids = _load_failed_union_ids(failed_path, dataset_name=ds_name, union_namespace=args.collection)
-        remapped_qrels, removed_rels = _remove_failed_from_qrels(remapped_qrels, failed_ids)
+        failed_ids_all = _load_failed_union_ids(
+            failed_path, dataset_name=ds_name, union_namespace=args.collection
+        )
+        # Only remove failed IDs that are actually missing in the current collection.
+        failed_ids_missing = _filter_failed_ids_to_missing(
+            qdrant_client=retriever.client,
+            collection_name=str(args.collection),
+            failed_ids=failed_ids_all,
+            timeout=int(args.qdrant_timeout),
+        )
+        remapped_qrels, removed_rels = _remove_failed_from_qrels(remapped_qrels, failed_ids_missing)
         dataset_index_failures[ds_name] = {
             "failed_log_path": str(failed_path),
-            "failed_ids_count": int(len(failed_ids)),
+            "failed_ids_count": int(len(failed_ids_all)),
+            "failed_ids_missing_count": int(len(failed_ids_missing)),
             "qrels_removed": int(removed_rels),
         }
 
@@ -1311,7 +1703,11 @@ def main() -> None:
             from qdrant_client.http import models as qmodels
 
             filter_obj = qmodels.Filter(
-                must=[qmodels.FieldCondition(key="dataset", match=qmodels.MatchValue(value=str(ds_name)))]
+                must=[
+                    qmodels.FieldCondition(
+                        key="dataset", match=qmodels.MatchValue(value=str(ds_name))
+                    )
+                ]
             )
 
         try:
@@ -1330,7 +1726,9 @@ def main() -> None:
                 drop_empty_queries=bool(args.drop_empty_queries),
                 filter_obj=filter_obj,
             )
-            dataset_counts[ds_name]["queries_eval"] = int(metrics_by_dataset[ds_name].get("num_queries_eval", 0))
+            dataset_counts[ds_name]["queries_eval"] = int(
+                metrics_by_dataset[ds_name].get("num_queries_eval", 0)
+            )
             ds_only_out = {
                 **_build_run_record(),
                 "dataset": str(ds_name),

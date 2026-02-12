@@ -3,6 +3,7 @@
 AVAILABLE_MODELS = [
     "vidore/colpali-v1.3",
     "vidore/colSmol-500M",
+    "vidore/colqwen2.5-v0.2",
 ]
 
 BENCHMARK_DATASETS = [
@@ -26,9 +27,9 @@ RETRIEVAL_MODES = [
 ]
 
 STAGE1_MODES = [
-    "tokens_vs_tiles",
-    "tokens_vs_experimental",
-    "pooled_query_vs_tiles",
-    "pooled_query_vs_experimental",
+    "tokens_vs_standard_pooling",
+    "tokens_vs_experimental_pooling",
+    "pooled_query_vs_standard_pooling",
+    "pooled_query_vs_experimental_pooling",
     "pooled_query_vs_global",
 ]

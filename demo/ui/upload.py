@@ -1,12 +1,11 @@
 """Upload tab component."""
 
+import inspect
+import json
 import os
 import tempfile
 import time
 import traceback
-import json
-import inspect
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -14,33 +13,33 @@ import streamlit as st
 
 from demo.config import AVAILABLE_MODELS
 from demo.qdrant_utils import (
-    get_qdrant_credentials,
     get_collection_stats,
+    get_qdrant_credentials,
     sample_points_cached,
 )
 from visual_rag.embedding.visual_embedder import VisualEmbedder
-from visual_rag.indexing.qdrant_indexer import QdrantIndexer
 from visual_rag.indexing.cloudinary_uploader import CloudinaryUploader
 from visual_rag.indexing.pipeline import ProcessingPipeline
-
+from visual_rag.indexing.qdrant_indexer import QdrantIndexer
 
 VECTOR_TYPES = ["initial", "mean_pooling", "experimental_pooling", "global_pooling"]
+
 
 def _load_metadata_mapping_from_uploaded_json(uploaded_json_file) -> tuple[dict, str]:
     """
     Load a filename->metadata mapping from an uploaded JSON file.
-    
+
     Supported formats:
     - Flat dict:
         { "Some Report 2023": {"year": 2023, "source": "...", ...}, ... }
     - Nested dict:
         { "filenames": { "Some Report 2023": {...}, ... }, ... }
-    
+
     Keys are normalized to: lowercase, trimmed, without ".pdf".
     """
     if uploaded_json_file is None:
         return {}, ""
-    
+
     try:
         raw = uploaded_json_file.getvalue()
         if not raw:
@@ -48,12 +47,12 @@ def _load_metadata_mapping_from_uploaded_json(uploaded_json_file) -> tuple[dict,
         data = json.loads(raw.decode("utf-8"))
         if not isinstance(data, dict):
             return {}, "Metadata file must be a JSON object"
-        
+
         mapping = data.get("filenames") if isinstance(data.get("filenames"), dict) else data
-        
+
         # Drop non-mapping keys (common pattern: _description, _usage)
         mapping = {k: v for k, v in mapping.items() if isinstance(k, str) and not k.startswith("_")}
-        
+
         normalized: dict[str, dict] = {}
         bad = 0
         for k, v in mapping.items():
@@ -67,7 +66,7 @@ def _load_metadata_mapping_from_uploaded_json(uploaded_json_file) -> tuple[dict,
                 bad += 1
                 continue
             normalized[key] = v
-        
+
         msg = f"Loaded {len(normalized):,} filename metadata mappings"
         if bad:
             msg += f" (ignored {bad:,} non-mapping entries)"
@@ -81,26 +80,30 @@ def render_upload_tab():
         msg = st.session_state.pop("upload_success")
         st.toast(f"✅ {msg}", icon="🎉")
         st.balloons()
-    
+
     st.subheader("📤 PDF Upload & Processing")
-    
+
     col_upload, col_config = st.columns([3, 2])
-    
+
     with col_config:
         st.markdown("##### Configuration")
-        
+
         c1, c2 = st.columns(2)
         with c1:
             model_name = st.selectbox("Model", AVAILABLE_MODELS, index=1, key="upload_model")
         with c2:
-            collection_name = st.text_input("Collection", value="my_collection", key="upload_collection_input")
-        
+            collection_name = st.text_input(
+                "Collection", value="my_collection", key="upload_collection_input"
+            )
+
         c3, c4 = st.columns(2)
         with c3:
-            vector_dtype = st.selectbox("Vector Dtype", ["float16", "float32"], index=0, key="upload_dtype")
+            vector_dtype = st.selectbox(
+                "Vector Dtype", ["float16", "float32"], index=0, key="upload_dtype"
+            )
         with c4:
             use_cloudinary = st.toggle("Cloudinary", value=True, key="upload_cloudinary")
-        
+
         st.markdown("**Performance**")
         p1, p2, p3 = st.columns(3)
         with p1:
@@ -139,9 +142,9 @@ def render_upload_tab():
             VECTOR_TYPES,
             default=VECTOR_TYPES,
             key="upload_vectors",
-            help="Which vector types to store in Qdrant"
+            help="Which vector types to store in Qdrant",
         )
-        
+
         st.markdown("**Crop Settings**")
         cc1, cc2 = st.columns(2)
         with cc1:
@@ -154,7 +157,9 @@ def render_upload_tab():
                 uniform_rowcol_std_threshold = st.select_slider(
                     "Uniform row/col threshold (any color)",
                     options=[0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 16.0],
-                    value=float(st.session_state.get("upload_uniform_rowcol_std_threshold", 0.0) or 0.0),
+                    value=float(
+                        st.session_state.get("upload_uniform_rowcol_std_threshold", 0.0) or 0.0
+                    ),
                     key="upload_uniform_rowcol_std_threshold",
                     help=(
                         "0 = off (default). Higher values remove more uniform borders, even if they are gray/black. "
@@ -165,13 +170,20 @@ def render_upload_tab():
                         "- 8+: aggressive (may remove faint content)"
                     ),
                 )
-        
+
         if crop_empty:
-            crop_pct = st.slider("Crop %", 0.90, 0.99, 0.99, 0.01, key="upload_crop_pct", 
-                                help="Remove margins with this % empty space")
+            crop_pct = st.slider(
+                "Crop %",
+                0.90,
+                0.99,
+                0.99,
+                0.01,
+                key="upload_crop_pct",
+                help="Remove margins with this % empty space",
+            )
         else:
             crop_pct = 0.99
-        
+
         st.markdown("**File Metadata (optional)**")
         meta_file = st.file_uploader(
             "Metadata mapping (JSON)",
@@ -195,7 +207,7 @@ def render_upload_tab():
                 st.warning(meta_msg or "No mappings loaded")
         else:
             metadata_mapping = {}
-    
+
     with col_upload:
         uploaded_files = st.file_uploader(
             "Select PDF files",
@@ -203,10 +215,10 @@ def render_upload_tab():
             accept_multiple_files=True,
             key="pdf_uploader",
         )
-        
+
         if uploaded_files:
             st.success(f"**{len(uploaded_files)} file(s) selected**")
-            
+
             if st.button("🚀 Process PDFs", type="primary", key="process_btn"):
                 config = {
                     "model_name": model_name,
@@ -223,7 +235,7 @@ def render_upload_tab():
                     "upload_batch_size": int(upload_batch_size),
                 }
                 process_pdfs(uploaded_files, config)
-    
+
     if st.session_state.get("last_upload_result"):
         st.divider()
         render_upload_results()
@@ -241,21 +253,21 @@ def process_pdfs(uploaded_files, config):
     dpi = int(config.get("dpi") or 140)
     embed_batch_size = int(config.get("embed_batch_size") or 8)
     upload_batch_size = int(config.get("upload_batch_size") or 8)
-    
+
     st.divider()
-    
+
     phase1 = st.container()
     phase2 = st.container()
     phase3 = st.container()
     results_container = st.container()
-    
+
     try:
         with phase1:
             st.markdown("##### 🤖 Phase 1: Loading Model")
             model_status = st.empty()
             model_short = model_name.split("/")[-1]
             model_status.info(f"Loading `{model_short}`...")
-            
+
             output_dtype = np.float16 if vector_dtype == "float16" else np.float32
             embedder_key = f"{model_name}::{vector_dtype}"
             embedder = None
@@ -267,18 +279,18 @@ def process_pdfs(uploaded_files, config):
                 st.session_state["upload_embedder_key"] = embedder_key
                 st.session_state["upload_embedder"] = embedder
             model_status.success(f"✅ Model `{model_short}` loaded ({vector_dtype})")
-        
+
         with phase2:
             st.markdown("##### 📦 Phase 2: Setting Up Collection")
-            
+
             url, api_key = get_qdrant_credentials()
             if not url or not api_key:
                 st.error("Qdrant credentials not configured")
                 return
-            
+
             qdrant_status = st.empty()
-            qdrant_status.info(f"Connecting to Qdrant...")
-            
+            qdrant_status.info("Connecting to Qdrant...")
+
             indexer = QdrantIndexer(
                 url=url,
                 api_key=api_key,
@@ -287,15 +299,15 @@ def process_pdfs(uploaded_files, config):
                 vector_datatype=vector_dtype,
                 timeout=180,
             )
-            qdrant_status.success(f"✅ Connected to Qdrant")
-            
+            qdrant_status.success("✅ Connected to Qdrant")
+
             coll_status = st.empty()
             collection_exists = False
             try:
                 collection_exists = indexer.collection_exists()
             except Exception:
                 pass
-            
+
             if collection_exists:
                 coll_status.success(f"✅ Collection `{collection_name}` exists (will append)")
             else:
@@ -304,24 +316,26 @@ def process_pdfs(uploaded_files, config):
                     try:
                         indexer.create_collection(force_recreate=False)
                         break
-                    except Exception as e:
+                    except Exception:
                         if attempt < 2:
                             time.sleep(2)
                         else:
                             raise
                 coll_status.success(f"✅ Collection `{collection_name}` created")
-            
+
             idx_status = st.empty()
             idx_status.info("Setting up indexes...")
             try:
-                indexer.create_payload_indexes(fields=[
-                    {"field": "filename", "type": "keyword"},
-                    {"field": "page_number", "type": "integer"},
-                ])
+                indexer.create_payload_indexes(
+                    fields=[
+                        {"field": "filename", "type": "keyword"},
+                        {"field": "page_number", "type": "integer"},
+                    ]
+                )
             except Exception:
                 pass
             idx_status.success("✅ Indexes ready")
-            
+
             cloud_status = st.empty()
             cloudinary_uploader = None
             if use_cloudinary:
@@ -333,9 +347,11 @@ def process_pdfs(uploaded_files, config):
                     cloud_status.warning(f"⚠️ Cloudinary unavailable: {str(e)[:30]}")
             else:
                 cloud_status.info("☁️ Cloudinary disabled")
-            
+
             pipeline = ProcessingPipeline(
-                embedder=embedder, indexer=indexer, cloudinary_uploader=cloudinary_uploader,
+                embedder=embedder,
+                indexer=indexer,
+                cloudinary_uploader=cloudinary_uploader,
                 metadata_mapping=metadata_mapping,
                 config={
                     "processing": {"dpi": dpi},
@@ -344,46 +360,54 @@ def process_pdfs(uploaded_files, config):
                         "upload_batch_size": upload_batch_size,
                     },
                 },
-                crop_empty=crop_empty, crop_empty_percentage_to_remove=crop_pct,
-                **({
-                    "crop_empty_uniform_rowcol_std_threshold": uniform_rowcol_std_threshold
-                } if "crop_empty_uniform_rowcol_std_threshold" in inspect.signature(ProcessingPipeline.__init__).parameters else {}),
+                crop_empty=crop_empty,
+                crop_empty_percentage_to_remove=crop_pct,
+                **(
+                    {"crop_empty_uniform_rowcol_std_threshold": uniform_rowcol_std_threshold}
+                    if "crop_empty_uniform_rowcol_std_threshold"
+                    in inspect.signature(ProcessingPipeline.__init__).parameters
+                    else {}
+                ),
             )
-        
+
         with phase3:
             st.markdown("##### 📄 Phase 3: Processing PDFs")
-            
+
             overall_progress = st.progress(0.0)
             file_status = st.empty()
             log_area = st.empty()
             log_lines = []
-            
+
             total_uploaded, total_skipped, total_failed = 0, 0, 0
             file_results = []
-            
+
             page_status = st.empty()
-            
+
             for i, f in enumerate(uploaded_files):
                 original_filename = f.name
-                file_status.info(f"📄 Processing `{original_filename}` ({i+1}/{len(uploaded_files)})")
+                file_status.info(
+                    f"📄 Processing `{original_filename}` ({i+1}/{len(uploaded_files)})"
+                )
                 t0 = time.perf_counter()
-                
+
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                     tmp.write(f.getvalue())
                     tmp_path = Path(tmp.name)
-                
+
                 def progress_cb(stage, current, total, message):
                     if stage == "process" and total > 0:
                         page_status.caption(f"  └─ Page {current}/{total}")
                     elif stage == "embed" and total > 0:
                         # Never show internal function names; keep this human-friendly.
-                        page_status.caption(f"  └─ Embedding pages… ({current+1}-{min(current + 1 + (pipeline.embedding_batch_size - 1), total)}/{total})")
+                        page_status.caption(
+                            f"  └─ Embedding pages… ({current+1}-{min(current + 1 + (pipeline.embedding_batch_size - 1), total)}/{total})"
+                        )
                     elif stage == "convert" and total > 0:
                         page_status.caption(f"  └─ {total} pages found")
-                
+
                 try:
                     result = pipeline.process_pdf(
-                        tmp_path, 
+                        tmp_path,
                         original_filename=original_filename,
                         progress_callback=progress_cb,
                     )
@@ -394,36 +418,46 @@ def process_pdfs(uploaded_files, config):
                     total_skipped += skipped
                     total_pages = int(result.get("total_pages") or 0)
                     sec_per_page = (elapsed_s / total_pages) if total_pages > 0 else None
-                    file_results.append({
-                        "file": original_filename,
-                        "uploaded": uploaded,
-                        "skipped": skipped,
-                        "total_pages": total_pages,
-                        "elapsed_s": float(elapsed_s),
-                        "sec_per_page": float(sec_per_page) if sec_per_page is not None else None,
-                    })
-                    timing_str = f"{elapsed_s:.1f}s" + (f" ({sec_per_page:.2f}s/page)" if sec_per_page is not None else "")
-                    log_lines.append(f"✓ {original_filename}: {uploaded} uploaded, {skipped} skipped | {timing_str}")
+                    file_results.append(
+                        {
+                            "file": original_filename,
+                            "uploaded": uploaded,
+                            "skipped": skipped,
+                            "total_pages": total_pages,
+                            "elapsed_s": float(elapsed_s),
+                            "sec_per_page": (
+                                float(sec_per_page) if sec_per_page is not None else None
+                            ),
+                        }
+                    )
+                    timing_str = f"{elapsed_s:.1f}s" + (
+                        f" ({sec_per_page:.2f}s/page)" if sec_per_page is not None else ""
+                    )
+                    log_lines.append(
+                        f"✓ {original_filename}: {uploaded} uploaded, {skipped} skipped | {timing_str}"
+                    )
                 except Exception as e:
                     total_failed += 1
                     log_lines.append(f"✗ {original_filename}: {str(e)[:50]}")
                 finally:
                     os.unlink(tmp_path)
-                
+
                 page_status.empty()
                 overall_progress.progress((i + 1) / len(uploaded_files))
                 log_area.code("\n".join(log_lines[-10:]), language="text")
-            
+
             overall_progress.progress(1.0)
             file_status.success(f"✅ Processed {len(uploaded_files)} file(s)")
-        
+
         with results_container:
             st.markdown("##### 📊 Results")
-            
-            st.success(f"✅ **{total_uploaded} pages** uploaded to `{collection_name}`" + 
-                       (f" ({total_skipped} skipped)" if total_skipped else "") +
-                       (f" ({total_failed} failed)" if total_failed else ""))
-            
+
+            st.success(
+                f"✅ **{total_uploaded} pages** uploaded to `{collection_name}`"
+                + (f" ({total_skipped} skipped)" if total_skipped else "")
+                + (f" ({total_failed} failed)" if total_failed else "")
+            )
+
             if file_results:
                 with st.expander("📋 File Details", expanded=False):
                     for fr in file_results:
@@ -438,19 +472,24 @@ def process_pdfs(uploaded_files, config):
                             + (f", {fr['total_pages']} pages" if fr.get("total_pages") else "")
                             + timing
                         )
-        
+
         st.session_state["last_upload_result"] = {
-            "total_uploaded": total_uploaded, "total_skipped": total_skipped, "total_failed": total_failed,
-            "file_results": file_results, "collection": collection_name,
+            "total_uploaded": total_uploaded,
+            "total_skipped": total_skipped,
+            "total_failed": total_failed,
+            "file_results": file_results,
+            "collection": collection_name,
         }
-        
+
         get_collection_stats.clear()
         sample_points_cached.clear()
-        
+
         if total_uploaded > 0:
-            st.session_state["upload_success"] = f"Uploaded {total_uploaded} pages to {collection_name}"
+            st.session_state["upload_success"] = (
+                f"Uploaded {total_uploaded} pages to {collection_name}"
+            )
             st.rerun()  # Immediately refresh to show success toast + balloons
-            
+
     except Exception as e:
         st.error(f"❌ Processing error: {e}")
         with st.expander("Traceback"):
@@ -461,17 +500,19 @@ def render_upload_results():
     result = st.session_state.get("last_upload_result", {})
     if not result:
         return
-    
+
     uploaded = result.get("total_uploaded", 0)
     skipped = result.get("total_skipped", 0)
     failed = result.get("total_failed", 0)
     collection = result.get("collection", "")
     file_results = result.get("file_results", [])
-    
-    st.success(f"✅ **{uploaded} pages** uploaded to `{collection}`" + 
-               (f" ({skipped} skipped)" if skipped else "") +
-               (f" ({failed} failed)" if failed else ""))
-    
+
+    st.success(
+        f"✅ **{uploaded} pages** uploaded to `{collection}`"
+        + (f" ({skipped} skipped)" if skipped else "")
+        + (f" ({failed} failed)" if failed else "")
+    )
+
     if file_results:
         with st.expander("📋 Details", expanded=False):
             for fr in file_results:

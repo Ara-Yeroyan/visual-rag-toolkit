@@ -37,8 +37,3 @@ def recall_at_k(ranking: List[str], qrels: Dict[str, int], k: int) -> float:
         return 0.0
     retrieved = set(ranking[:k])
     return len(retrieved & relevant) / len(relevant)
-
-
-
-
-

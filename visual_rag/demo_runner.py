@@ -65,6 +65,7 @@ def demo(
     # Make sure the demo doesn't spam internal Streamlit warnings in logs.
     env.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 
+    print("Launching Streamlit demo:", " ".join(cmd), file=sys.stderr, flush=True)
     return subprocess.call(cmd, env=env)
 
 
@@ -86,3 +87,7 @@ def main() -> None:
         extra_args=unknown,
     )
     raise SystemExit(rc)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

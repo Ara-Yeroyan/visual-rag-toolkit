@@ -124,6 +124,67 @@ def colpali_row_mean_pooling(
     return pooled.astype(out_dtype)
 
 
+def adaptive_row_mean_pooling_from_grid(
+    embedding: Union[torch.Tensor, np.ndarray],
+    *,
+    grid_h: int,
+    grid_w: int,
+    target_rows: int = 32,
+    output_dtype: Optional[np.dtype] = None,
+) -> np.ndarray:
+    """
+    Row-mean pooling for arbitrary H×W patch grids with adaptive down/up-sampling to `target_rows`.
+
+    This is useful for dynamic-resolution models (e.g., ColQwen2.5) where the number of
+    visual tokens (patches) is not fixed to a 32×32 grid.
+
+    Steps:
+    1) reshape tokens to [H, W, dim]
+    2) mean over columns -> [H, dim]
+    3) adaptive mean-pool rows to `target_rows` -> [target_rows, dim]
+    """
+    out_dtype = _infer_output_dtype(embedding, output_dtype)
+    if isinstance(embedding, torch.Tensor):
+        if embedding.dtype == torch.bfloat16:
+            emb_np = embedding.cpu().float().numpy()
+        else:
+            emb_np = embedding.cpu().numpy().astype(np.float32)
+    else:
+        emb_np = np.array(embedding, dtype=np.float32)
+
+    num_tokens, dim = emb_np.shape
+    expected = int(grid_h) * int(grid_w)
+    if num_tokens != expected:
+        raise ValueError(
+            f"Expected {expected} visual tokens for grid_h×grid_w={grid_h}×{grid_w}, got {num_tokens}"
+        )
+
+    grid = emb_np.reshape(int(grid_h), int(grid_w), int(dim))
+    rows = grid.mean(axis=1)  # [H, dim]
+
+    h = int(rows.shape[0])
+    target_rows = int(target_rows)
+    if target_rows <= 0:
+        raise ValueError("target_rows must be > 0")
+    if h == target_rows:
+        return rows.astype(out_dtype)
+    if h == 1:
+        return np.repeat(rows, repeats=target_rows, axis=0).astype(out_dtype)
+
+    # Adaptive average pooling along the row dimension.
+    # We use evenly spaced bins over [0, H) and mean rows per bin.
+    edges = np.linspace(0, h, target_rows + 1)
+    pooled = np.zeros((target_rows, int(dim)), dtype=np.float32)
+    for i in range(target_rows):
+        start = int(np.floor(edges[i]))
+        end = int(np.ceil(edges[i + 1]))
+        start = max(0, min(start, h - 1))
+        end = max(start + 1, min(end, h))
+        pooled[i] = rows[start:end].mean(axis=0)
+
+    return pooled.astype(out_dtype)
+
+
 def colsmol_experimental_pooling(
     embedding: Union[torch.Tensor, np.ndarray],
     num_tiles: int,
@@ -173,20 +234,19 @@ def colsmol_experimental_pooling(
 
 def colpali_experimental_pooling_from_rows(
     row_vectors: Union[torch.Tensor, np.ndarray],
+    *,
+    window_size: int = 3,
     output_dtype: Optional[np.dtype] = None,
 ) -> np.ndarray:
     """
-    Experimental "convolution-style" pooling with window size 3.
+    Experimental "convolution-style" pooling with an odd `window_size` (default: 3).
 
-    For N input rows, produces N + 2 output vectors:
-    - Position 0: row[0] alone (1 row)
-    - Position 1: mean(rows[0:2]) (2 rows)
-    - Position 2: mean(rows[0:3]) (3 rows)
-    - Positions 3 to N-1: sliding window of 3 (rows[i-2:i+1])
-    - Position N: mean(rows[N-2:N]) (last 2 rows)
-    - Position N+1: row[N-1] alone (last row)
+    For N input rows and radius r = window_size//2, produces N + 2r output vectors.
+    Each output position uses a clipped window around a (possibly out-of-range) center:
+      center = i - r, i in [0, N + 2r - 1]
+      window = rows[max(0, center-r) : min(N, center+r+1)]
 
-    For N=32 rows: produces 34 vectors.
+    For window_size=3 and N=32 rows: produces 34 vectors (same as previous implementation).
     """
     out_dtype = _infer_output_dtype(row_vectors, output_dtype)
     if isinstance(row_vectors, torch.Tensor):
@@ -200,30 +260,29 @@ def colpali_experimental_pooling_from_rows(
     n, dim = rows.shape
     if n < 1:
         raise ValueError("row_vectors must be non-empty")
-    if n == 1:
-        return rows.astype(out_dtype)
-    if n == 2:
-        return np.stack([rows[0], rows[:2].mean(axis=0), rows[1]], axis=0).astype(out_dtype)
-    if n == 3:
-        return np.stack(
-            [
-                rows[0],
-                rows[:2].mean(axis=0),
-                rows[:3].mean(axis=0),
-                rows[1:3].mean(axis=0),
-                rows[2],
-            ],
-            axis=0,
-        ).astype(out_dtype)
 
-    out = np.zeros((n + 2, dim), dtype=np.float32)
-    out[0] = rows[0]
-    out[1] = rows[:2].mean(axis=0)
-    out[2] = rows[:3].mean(axis=0)
-    for i in range(3, n):
-        out[i] = rows[i - 2 : i + 1].mean(axis=0)
-    out[n] = rows[n - 2 : n].mean(axis=0)
-    out[n + 1] = rows[n - 1]
+    window_size = int(window_size)
+    if window_size < 1:
+        raise ValueError("window_size must be >= 1")
+    if window_size % 2 == 0:
+        raise ValueError("window_size must be odd")
+    if window_size == 1 or n == 1:
+        return rows.astype(out_dtype)
+
+    r = window_size // 2
+    # Preserve legacy edge-case behavior for the default window_size=3:
+    # - n=1 -> (1, dim)
+    # - n=2 -> (3, dim): [row0, mean(row0,row1), row1]
+    # - n>=3 -> (n+2, dim)
+    if int(window_size) == 3 and int(n) == 2:
+        mid = rows.mean(axis=0)
+        return np.stack([rows[0], mid, rows[1]], axis=0).astype(out_dtype)
+    out = np.zeros((n + 2 * r, dim), dtype=np.float32)
+    for i in range(n + 2 * r):
+        center = i - r
+        lo = max(0, center - r)
+        hi = min(n - 1, center + r)
+        out[i] = rows[lo : hi + 1].mean(axis=0)
     return out.astype(out_dtype)
 
 

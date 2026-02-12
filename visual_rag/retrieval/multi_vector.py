@@ -151,7 +151,7 @@ class MultiVectorRetriever:
         top_k: int = 10,
         mode: str = "single_full",
         prefetch_k: Optional[int] = None,
-        stage1_mode: str = "pooled_query_vs_tiles",
+        stage1_mode: str = "pooled_query_vs_standard_pooling",
         filter_obj=None,
         return_embeddings: bool = False,
     ) -> List[Dict[str, Any]]:
@@ -179,7 +179,7 @@ class MultiVectorRetriever:
         top_k: int = 10,
         mode: str = "single_full",
         prefetch_k: Optional[int] = None,
-        stage1_mode: str = "pooled_query_vs_tiles",
+        stage1_mode: str = "pooled_query_vs_standard_pooling",
         stage1_k: Optional[int] = None,
         stage2_k: Optional[int] = None,
         filter_obj=None,
@@ -190,14 +190,14 @@ class MultiVectorRetriever:
                 query_embedding=query_embedding,
                 top_k=top_k,
                 filter_obj=filter_obj,
-                using="initial",
+                strategy="multi_vector",
             )
         elif mode == "single_pooled":
             return self._single_stage.search(
                 query_embedding=query_embedding,
                 top_k=top_k,
                 filter_obj=filter_obj,
-                using="mean_pooling",
+                strategy="pooled_tile",
             )
         elif mode == "two_stage":
             return self._two_stage.search_server_side(

@@ -4,7 +4,8 @@ import streamlit as st
 
 
 def render_header():
-    st.markdown("""
+    st.markdown(
+        """
     <div style="text-align: center; padding: 10px 0 15px 0;">
         <h1 style="
             font-family: 'Georgia', serif;
@@ -35,4 +36,6 @@ def render_header():
             </a>
         </p>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )

@@ -7,13 +7,16 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from benchmarks.vidore_tatdqa_test.dataset_loader import (
+    load_vidore_dataset_auto,
+    paired_doc_id,
+    paired_payload,
+)
+from benchmarks.vidore_tatdqa_test.metrics import mrr_at_k, ndcg_at_k, recall_at_k
 from visual_rag import VisualEmbedder
 from visual_rag.embedding.pooling import tile_level_mean_pooling
 from visual_rag.indexing.qdrant_indexer import QdrantIndexer
 from visual_rag.retrieval import MultiVectorRetriever
-
-from benchmarks.vidore_tatdqa_test.dataset_loader import load_vidore_dataset_auto, paired_doc_id, paired_payload
-from benchmarks.vidore_tatdqa_test.metrics import ndcg_at_k, mrr_at_k, recall_at_k
 
 
 def _torch_dtype_to_str(dtype) -> str:
@@ -144,7 +147,9 @@ def _index_corpus(
         pass
 
     def _upload(points: List[Dict[str, Any]]) -> int:
-        return indexer.upload_batch(points, delay_between_batches=0.0, wait=upsert_wait, stop_event=stop_event)
+        return indexer.upload_batch(
+            points, delay_between_batches=0.0, wait=upsert_wait, stop_event=stop_event
+        )
 
     executor = None
     futures = []
@@ -152,7 +157,8 @@ def _index_corpus(
 
     stop_event = threading.Event()
     if upload_workers and upload_workers > 0:
-        from concurrent.futures import ThreadPoolExecutor, wait as futures_wait, FIRST_EXCEPTION
+        from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor
+        from concurrent.futures import wait as futures_wait
 
         executor = ThreadPoolExecutor(max_workers=upload_workers)
 
@@ -226,9 +232,17 @@ def _index_corpus(
 
             for doc, emb, token_info in zip(batch, embeddings, token_infos):
                 if doc.image is None:
-                    raise ValueError("CorpusDoc.image is None. For paired datasets, use _index_paired_dataset().")
-                emb_np = emb.cpu().float().numpy() if hasattr(emb, "cpu") else np.array(emb, dtype=np.float32)
-                visual_indices = token_info.get("visual_token_indices") or list(range(emb_np.shape[0]))
+                    raise ValueError(
+                        "CorpusDoc.image is None. For paired datasets, use _index_paired_dataset()."
+                    )
+                emb_np = (
+                    emb.cpu().float().numpy()
+                    if hasattr(emb, "cpu")
+                    else np.array(emb, dtype=np.float32)
+                )
+                visual_indices = token_info.get("visual_token_indices") or list(
+                    range(emb_np.shape[0])
+                )
                 visual_embedding = emb_np[visual_indices].astype(np.float32)
 
                 n_rows = token_info.get("n_rows")
@@ -238,7 +252,9 @@ def _index_corpus(
                 else:
                     num_tiles = 13
 
-                tile_pooled = tile_level_mean_pooling(visual_embedding, num_tiles=num_tiles, patches_per_tile=64)
+                tile_pooled = tile_level_mean_pooling(
+                    visual_embedding, num_tiles=num_tiles, patches_per_tile=64
+                )
                 global_pooled = tile_pooled.mean(axis=0).astype(np.float32)
 
                 payload = {
@@ -270,8 +286,8 @@ def _index_corpus(
                     if pbar is not None:
                         pbar.set_postfix(
                             {
-                            "avg_s/doc": f"{avg_s_per_doc:.2f}",
-                            "last_s/doc": f"{last_s_per_doc:.2f}",
+                                "avg_s/doc": f"{avg_s_per_doc:.2f}",
+                                "last_s/doc": f"{last_s_per_doc:.2f}",
                                 "buffer": len(points_buffer),
                                 "enq": enqueued_docs,
                                 "upl": uploaded_docs,
@@ -343,7 +359,9 @@ def _index_paired_dataset(
         import torch
         from torch.utils.data import DataLoader
     except ImportError as e:
-        raise ImportError("torch is required. Install with: pip install visual-rag-toolkit[embedding]") from e
+        raise ImportError(
+            "torch is required. Install with: pip install visual-rag-toolkit[embedding]"
+        ) from e
 
     ds0 = load_dataset(dataset_name, split="test")
     cols = set(ds0.column_names)
@@ -389,7 +407,9 @@ def _index_paired_dataset(
         pass
 
     def _upload(points: List[Dict[str, Any]]) -> int:
-        return indexer.upload_batch(points, delay_between_batches=0.0, wait=upsert_wait, stop_event=stop_event)
+        return indexer.upload_batch(
+            points, delay_between_batches=0.0, wait=upsert_wait, stop_event=stop_event
+        )
 
     executor = None
     futures = []
@@ -397,7 +417,8 @@ def _index_paired_dataset(
 
     stop_event = threading.Event()
     if upload_workers and upload_workers > 0:
-        from concurrent.futures import ThreadPoolExecutor, wait as futures_wait, FIRST_EXCEPTION
+        from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor
+        from concurrent.futures import wait as futures_wait
 
         executor = ThreadPoolExecutor(max_workers=upload_workers)
 
@@ -446,7 +467,12 @@ def _index_paired_dataset(
                 dl_kwargs["pin_memory"] = bool(pin_memory and torch.cuda.is_available())
 
             data_loader = DataLoader(
-                _PairedHFDataset(dataset_name=dataset_name, split="test", total_docs=total_docs, image_col=image_col),
+                _PairedHFDataset(
+                    dataset_name=dataset_name,
+                    split="test",
+                    total_docs=total_docs,
+                    image_col=image_col,
+                ),
                 **dl_kwargs,
             )
             iterable = ((idxs, images, metas) for (idxs, images, metas) in data_loader)
@@ -457,7 +483,10 @@ def _index_paired_dataset(
                 for start in range(0, total_docs, batch_size):
                     batch = ds[start : start + batch_size]
                     images = batch[image_col]
-                    metas = [{k: batch[k][i] for k in batch.keys() if k != image_col} for i in range(len(images))]
+                    metas = [
+                        {k: batch[k][i] for k in batch.keys() if k != image_col}
+                        for i in range(len(images))
+                    ]
                     idxs = list(range(start, start + len(images)))
                     yield idxs, images, metas
 
@@ -501,15 +530,23 @@ def _index_paired_dataset(
                     **paired_payload(meta, int(idx)),
                 }
 
-                emb_np = emb.cpu().float().numpy() if hasattr(emb, "cpu") else np.array(emb, dtype=np.float32)
-                visual_indices = token_info.get("visual_token_indices") or list(range(emb_np.shape[0]))
+                emb_np = (
+                    emb.cpu().float().numpy()
+                    if hasattr(emb, "cpu")
+                    else np.array(emb, dtype=np.float32)
+                )
+                visual_indices = token_info.get("visual_token_indices") or list(
+                    range(emb_np.shape[0])
+                )
                 visual_embedding = emb_np[visual_indices].astype(np.float32)
 
                 n_rows = token_info.get("n_rows")
                 n_cols = token_info.get("n_cols")
                 num_tiles = int(n_rows) * int(n_cols) + 1 if n_rows and n_cols else 13
 
-                tile_pooled = tile_level_mean_pooling(visual_embedding, num_tiles=num_tiles, patches_per_tile=64)
+                tile_pooled = tile_level_mean_pooling(
+                    visual_embedding, num_tiles=num_tiles, patches_per_tile=64
+                )
                 global_pooled = tile_pooled.mean(axis=0).astype(np.float32)
 
                 points_buffer.append(
@@ -654,8 +691,14 @@ def main() -> None:
     grpc_group = parser.add_mutually_exclusive_group()
     grpc_group.add_argument("--prefer-grpc", dest="prefer_grpc", action="store_true", default=True)
     grpc_group.add_argument("--no-prefer-grpc", dest="prefer_grpc", action="store_false")
-    parser.add_argument("--index", action="store_true", help="Index corpus into Qdrant before evaluating")
-    parser.add_argument("--recreate", action="store_true", help="Delete and recreate the collection (implies --index)")
+    parser.add_argument(
+        "--index", action="store_true", help="Index corpus into Qdrant before evaluating"
+    )
+    parser.add_argument(
+        "--recreate",
+        action="store_true",
+        help="Delete and recreate the collection (implies --index)",
+    )
     parser.add_argument(
         "--indexing-threshold",
         type=int,
@@ -679,8 +722,19 @@ def main() -> None:
     parser.add_argument(
         "--stage1-mode",
         type=str,
-        default="tokens_vs_tiles",
-        choices=["pooled_query_vs_tiles", "tokens_vs_tiles", "pooled_query_vs_global"],
+        default="tokens_vs_standard_pooling",
+        choices=[
+            "pooled_query_vs_standard_pooling",
+            "tokens_vs_standard_pooling",
+            "pooled_query_vs_experimental_pooling",
+            "tokens_vs_experimental_pooling",
+            "pooled_query_vs_global",
+            # Backwards-compatible aliases
+            "pooled_query_vs_tiles",
+            "tokens_vs_tiles",
+            "pooled_query_vs_experimental",
+            "tokens_vs_experimental",
+        ],
     )
     parser.add_argument("--output", type=str, default="results/qdrant_vidore_tatdqa_test.json")
 
@@ -795,5 +849,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

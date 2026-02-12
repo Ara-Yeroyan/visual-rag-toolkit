@@ -9,7 +9,7 @@ import streamlit as st
 
 def get_qdrant_credentials() -> Tuple[Optional[str], Optional[str]]:
     """Get Qdrant credentials from session state or environment variables.
-    
+
     Priority: session_state > QDRANT_URL/QDRANT_API_KEY > legacy env vars
     """
     url = (
@@ -28,6 +28,7 @@ def get_qdrant_credentials() -> Tuple[Optional[str], Optional[str]]:
 def init_qdrant_client_with_creds(url: str, api_key: str):
     try:
         from qdrant_client import QdrantClient
+
         if not url:
             return None, "QDRANT_URL not configured"
         client = QdrantClient(url=url, api_key=api_key, timeout=60)
@@ -47,6 +48,7 @@ def init_qdrant_client():
 def init_embedder(model_name: str):
     try:
         from visual_rag import VisualEmbedder
+
         return VisualEmbedder(model_name=model_name), None
     except Exception as e:
         return None, f"{e}\n\n{traceback.format_exc()}"
@@ -72,7 +74,9 @@ def get_collection_stats(collection_name: str) -> Dict[str, Any]:
         return {"error": err}
     try:
         info = client.get_collection(collection_name)
-        vectors_config = getattr(getattr(getattr(info, "config", None), "params", None), "vectors", None)
+        vectors_config = getattr(
+            getattr(getattr(info, "config", None), "params", None), "vectors", None
+        )
         vector_info = {}
         if vectors_config is not None:
             if hasattr(vectors_config, "items"):
@@ -96,7 +100,9 @@ def get_collection_stats(collection_name: str) -> Dict[str, Any]:
                     }
             elif hasattr(vectors_config, "size"):
                 on_disk = getattr(vectors_config, "on_disk", None)
-                datatype = str(getattr(vectors_config, "datatype", "Float32")).replace("Datatype.", "")
+                datatype = str(getattr(vectors_config, "datatype", "Float32")).replace(
+                    "Datatype.", ""
+                )
                 multivec = getattr(vectors_config, "multivector_config", None)
                 vector_info["default"] = {
                     "size": getattr(vectors_config, "size", None),
@@ -117,12 +123,15 @@ def get_collection_stats(collection_name: str) -> Dict[str, Any]:
 
 
 @st.cache_data(ttl=60)
-def sample_points_cached(collection_name: str, n: int, seed: int, _url: str, _api_key: str) -> List[Dict[str, Any]]:
+def sample_points_cached(
+    collection_name: str, n: int, seed: int, _url: str, _api_key: str
+) -> List[Dict[str, Any]]:
     client, err = init_qdrant_client_with_creds(_url, _api_key)
     if client is None:
         return []
     try:
         import random
+
         rng = random.Random(seed)
         points, _ = client.scroll(
             collection_name=collection_name,
@@ -136,10 +145,12 @@ def sample_points_cached(collection_name: str, n: int, seed: int, _url: str, _ap
         results = []
         for p in sampled:
             payload = dict(p.payload) if p.payload else {}
-            results.append({
-                "id": str(p.id),
-                "payload": payload,
-            })
+            results.append(
+                {
+                    "id": str(p.id),
+                    "payload": payload,
+                }
+            )
         return results
     except Exception:
         return []
@@ -181,14 +192,16 @@ def search_collection(
     top_k: int = 10,
     mode: str = "single_full",
     prefetch_k: int = 256,
-    stage1_mode: str = "tokens_vs_tiles",
+    stage1_mode: str = "tokens_vs_standard_pooling",
     stage1_k: int = 1000,
     stage2_k: int = 300,
     model_name: str = "vidore/colSmol-500M",
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     try:
         import traceback
+
         from visual_rag.retrieval import MultiVectorRetriever
+
         retriever = MultiVectorRetriever(
             collection_name=collection_name,
             model_name=model_name,
@@ -215,4 +228,5 @@ def search_collection(
         return results, None
     except Exception as e:
         import traceback
+
         return [], f"{e}\n\n{traceback.format_exc()}"

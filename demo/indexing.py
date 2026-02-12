@@ -1,22 +1,18 @@
 """Indexing runner with UI updates."""
 
 import hashlib
-import json
-import time
 import traceback
-from datetime import datetime
 from typing import Any, Dict, Optional
 
 import numpy as np
 import streamlit as st
 import torch
 
+from benchmarks.vidore_tatdqa_test.dataset_loader import load_vidore_beir_dataset
+from demo.qdrant_utils import get_qdrant_credentials
 from visual_rag import VisualEmbedder
 from visual_rag.embedding.pooling import tile_level_mean_pooling
 from visual_rag.indexing.qdrant_indexer import QdrantIndexer
-from benchmarks.vidore_tatdqa_test.dataset_loader import load_vidore_beir_dataset
-from demo.qdrant_utils import get_qdrant_credentials
-
 
 TORCH_DTYPE_MAP = {
     "float16": torch.float16,
@@ -63,9 +59,7 @@ def run_indexing_with_ui(config: Dict[str, Any]):
 
     print(f"[INDEX] Config: collection={collection}, model={model}")
     print(f"[INDEX] Datasets: {datasets}")
-    print(
-        f"[INDEX] max_docs={max_docs}, batch_size={batch_size}, recreate={recreate}"
-    )
+    print(f"[INDEX] max_docs={max_docs}, batch_size={batch_size}, recreate={recreate}")
     print(
         f"[INDEX] torch_dtype={torch_dtype}, qdrant_dtype={qdrant_vector_dtype}, grpc={prefer_grpc}"
     )
@@ -83,9 +77,7 @@ def run_indexing_with_ui(config: Dict[str, Any]):
 
             print(f"[INDEX] Loading embedder: {model}")
             torch_dtype_obj = TORCH_DTYPE_MAP.get(torch_dtype, torch.float16)
-            output_dtype_obj = (
-                np.float16 if qdrant_vector_dtype == "float16" else np.float32
-            )
+            output_dtype_obj = np.float16 if qdrant_vector_dtype == "float16" else np.float32
             embedder = VisualEmbedder(
                 model_name=model,
                 torch_dtype=torch_dtype_obj,
@@ -140,9 +132,7 @@ def run_indexing_with_ui(config: Dict[str, Any]):
                 ds_container = st.container()
 
                 with ds_container:
-                    st.markdown(
-                        f"**Dataset {ds_idx + 1}/{len(datasets)}: `{ds_short}`**"
-                    )
+                    st.markdown(f"**Dataset {ds_idx + 1}/{len(datasets)}: `{ds_short}`**")
 
                     load_status = st.empty()
                     load_status.info(f"Loading dataset `{ds_short}`...")
@@ -172,9 +162,7 @@ def run_indexing_with_ui(config: Dict[str, Any]):
                                 failed += 1
                                 continue
 
-                            status_text.text(
-                                f"Processing {i + 1}/{total}: {doc_id[:30]}..."
-                            )
+                            status_text.text(f"Processing {i + 1}/{total}: {doc_id[:30]}...")
 
                             embeddings, token_infos = embedder.embed_images(
                                 [image],

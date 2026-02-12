@@ -208,6 +208,9 @@ class QdrantIndexer:
         self.client.create_collection(
             collection_name=self.collection_name,
             vectors_config=vectors_config,
+            optimizers_config=qdrant_models.OptimizersConfigDiff(
+                indexing_threshold=int(indexing_threshold),
+            ),
         )
 
         # Create required payload index for skip_existing functionality
@@ -246,11 +249,46 @@ class QdrantIndexer:
 
         if not fields:
             return
+        # Cache between calls so multi-dataset runs don't spam logs.
+        if not hasattr(self, "_ensured_payload_indexes"):
+            self._ensured_payload_indexes = set()
+            self._payload_indexes_skip_logged = False
 
-        logger.info("📇 Creating payload indexes...")
+        requested_fields: List[str] = []
+        for fc in fields:
+            try:
+                requested_fields.append(str(fc["field"]))
+            except Exception:
+                continue
+        requested_set = set(requested_fields)
+
+        # Qdrant exposes indexed payload fields in collection_info.payload_schema
+        existing_indexed: set[str] = set()
+        try:
+            info = self.client.get_collection(self.collection_name)
+            payload_schema = getattr(info, "payload_schema", None) or {}
+            if isinstance(payload_schema, dict):
+                existing_indexed = set(str(k) for k in payload_schema.keys())
+        except Exception as e:
+            logger.debug(f"Could not read existing payload schema: {e}")
+
+        already = existing_indexed | set(self._ensured_payload_indexes)
+        missing = requested_set - already
+
+        if not missing:
+            # Log this only once per process to avoid repetition across datasets.
+            if not getattr(self, "_payload_indexes_skip_logged", False):
+                logger.info("📇 Payload indexes already exist — skipping creation")
+                self._payload_indexes_skip_logged = True
+            self._ensured_payload_indexes |= requested_set
+            return
+
+        logger.info(f"📇 Creating payload indexes ({len(missing)} new)...")
 
         for field_config in fields:
-            field_name = field_config["field"]
+            field_name = str(field_config["field"])
+            if field_name not in missing:
+                continue
             field_type_str = field_config.get("type", "keyword")
             field_type = type_mapping.get(field_type_str, qdrant_models.PayloadSchemaType.KEYWORD)
 
@@ -260,8 +298,11 @@ class QdrantIndexer:
                     field_name=field_name,
                     field_schema=field_type,
                 )
+                self._ensured_payload_indexes.add(field_name)
                 logger.info(f"   ✅ {field_name} ({field_type_str})")
             except Exception as e:
+                # If Qdrant reports it already exists anyway, treat it as ensured.
+                self._ensured_payload_indexes.add(field_name)
                 logger.debug(f"   Index {field_name} might already exist: {e}")
 
     def upload_batch(
@@ -382,8 +423,6 @@ class QdrantIndexer:
                     points=qdrant_points,
                     wait=wait,
                 )
-
-                logger.info(f"   ✅ Uploaded {len(points)} points to Qdrant")
 
                 if delay_between_batches > 0:
                     if _is_cancelled():

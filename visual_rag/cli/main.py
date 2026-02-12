@@ -561,8 +561,19 @@ Examples:
     search_parser.add_argument(
         "--stage1-mode",
         type=str,
-        default="pooled_query_vs_tiles",
-        choices=["pooled_query_vs_tiles", "tokens_vs_tiles", "pooled_query_vs_global"],
+        default="pooled_query_vs_standard_pooling",
+        choices=[
+            "pooled_query_vs_standard_pooling",
+            "tokens_vs_standard_pooling",
+            "pooled_query_vs_experimental_pooling",
+            "tokens_vs_experimental_pooling",
+            "pooled_query_vs_global",
+            # Backwards-compatible aliases (deprecated)
+            "pooled_query_vs_tiles",
+            "tokens_vs_tiles",
+            "pooled_query_vs_experimental",
+            "tokens_vs_experimental",
+        ],
         help="Stage 1 mode for two-stage retrieval",
     )
     search_parser.add_argument("--year", type=int, help="Filter by year")
