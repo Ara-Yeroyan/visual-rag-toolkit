@@ -460,6 +460,20 @@ def _detect_collection_vector_dtype(*, client, collection_name: str) -> Optional
     return None
 
 
+def _collection_vector_names(*, client, collection_name: str) -> set[str]:
+    try:
+        info = client.get_collection(str(collection_name))
+    except Exception:
+        return set()
+    try:
+        vectors = info.config.params.vectors or {}
+    except Exception:
+        vectors = {}
+    if isinstance(vectors, dict):
+        return set(str(k) for k in vectors.keys())
+    return set()
+
+
 def _write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
@@ -515,6 +529,7 @@ def _index_beir_corpus(
     crop_empty_preserve_border_px: int,
     crop_empty_uniform_std_threshold: float,
     max_mean_pool_vectors: Optional[int],
+    pooling_windows: Optional[List[int]],
     no_cloudinary: bool,
     cloudinary_folder: str,
     retry_failures: bool,
@@ -540,10 +555,33 @@ def _index_beir_corpus(
         vector_datatype=qdrant_vector_dtype,
         timeout=int(qdrant_timeout),
     )
+
+    model_lower = (model_name or "").lower()
+    is_colqwen25 = "colqwen2.5" in model_lower or "colqwen2_5" in model_lower
+    default_k = 5 if is_colqwen25 else 3
+    ks = pooling_windows if pooling_windows else [default_k]
+    seen_ks = set()
+    ks_norm: List[int] = []
+    for k in ks:
+        try:
+            ki = int(k)
+        except Exception:
+            continue
+        if ki <= 0:
+            continue
+        if ki in seen_ks:
+            continue
+        seen_ks.add(ki)
+        ks_norm.append(ki)
+    if not ks_norm:
+        ks_norm = [default_k]
+    experimental_vector_names = [f"experimental_pooling_{int(k)}" for k in ks_norm]
+
     indexer.create_collection(
         force_recreate=recreate,
         indexing_threshold=indexing_threshold,
         full_scan_threshold=int(full_scan_threshold),
+        experimental_vector_names=experimental_vector_names,
     )
     indexer.create_payload_indexes(fields=payload_indexes)
 
@@ -841,20 +879,35 @@ def _index_beir_corpus(
                         range(emb_np.shape[0])
                     )
                     visual_embedding = emb_np[visual_indices].astype(np.float32)
+
+                    tv = max_mean_pool_vectors
+                    if tv is not None:
+                        try:
+                            tv_i = int(tv)
+                            tv = None if tv_i <= 0 else tv_i
+                        except Exception:
+                            tv = 32
                     tile_pooled = embedder.mean_pool_visual_embedding(
-                        visual_embedding, token_info, target_vectors=max_mean_pool_vectors
+                        visual_embedding, token_info, target_vectors=tv
                     )
-                    experimental_pooled = embedder.experimental_pool_visual_embedding(
-                        visual_embedding,
-                        token_info,
-                        target_vectors=max_mean_pool_vectors,
-                        mean_pool=tile_pooled,
-                    )
+
+                    experimental_pooled_by_name: Dict[str, Any] = {}
+                    canonical_k = int(ks_norm[0]) if ks_norm else int(default_k)
+                    for k in ks_norm:
+                        exp = embedder.experimental_pool_visual_embedding(
+                            visual_embedding,
+                            token_info,
+                            target_vectors=tv,
+                            mean_pool=tile_pooled,
+                            window_size=int(k),
+                        )
+                        experimental_pooled_by_name[f"experimental_pooling_{int(k)}"] = exp
+                        if int(k) == int(canonical_k):
+                            experimental_pooled_by_name["experimental_pooling"] = exp
+
                     global_pooled = embedder.global_pool_from_mean_pool(tile_pooled)
 
                     # Log whenever ColQwen2.5 adaptive mean pooling actually downsamples rows.
-                    model_lower = (model_name or "").lower()
-                    is_colqwen25 = "colqwen2.5" in model_lower or "colqwen2_5" in model_lower
                     if is_colqwen25:
                         grid_h_eff = (token_info or {}).get("grid_h_eff")
                         if grid_h_eff is not None:
@@ -865,11 +918,16 @@ def _index_beir_corpus(
                                 h_eff = 0
                                 out_rows = 0
                             if h_eff > 0 and out_rows > 0 and out_rows < h_eff:
+                                tv_disp = (
+                                    int(max_mean_pool_vectors)
+                                    if max_mean_pool_vectors is not None
+                                    else None
+                                )
                                 msg = (
                                     "Downsampled ColQwen mean-pool rows for "
                                     f"union_doc_id={union_doc_id} (source_doc_id={source_doc_id}): "
                                     f"grid_h_eff={h_eff} -> {out_rows} "
-                                    f"(--max-mean-pool-vectors={max_mean_pool_vectors})"
+                                    f"(--max-mean-pool-vectors={tv_disp})"
                                 )
                                 if pbar is not None:
                                     try:
@@ -986,6 +1044,11 @@ def _index_beir_corpus(
                         and (token_info or {}).get("n_cols") is None
                     ),
                     "index_recovery_num_visual_tokens": int(visual_embedding.shape[0]),
+                    "experimental_pooling_windows": ks_norm,
+                    "experimental_pooling_default_window": int(ks_norm[0]) if ks_norm else None,
+                    "max_mean_pool_vectors": (
+                        int(max_mean_pool_vectors) if max_mean_pool_vectors is not None else None
+                    ),
                     **(doc.payload or {}),
                 }
 
@@ -994,7 +1057,7 @@ def _index_beir_corpus(
                         "id": union_doc_id,
                         "visual_embedding": visual_embedding,
                         "tile_pooled_embedding": tile_pooled,
-                        "experimental_pooled_embedding": experimental_pooled,
+                        "experimental_pooled_embedding": experimental_pooled_by_name,
                         "global_pooled_embedding": global_pooled,
                         "metadata": payload,
                     }
@@ -1112,11 +1175,24 @@ def main() -> None:
     parser.add_argument(
         "--max-mean-pool-vectors",
         type=int,
-        default=None,
+        default=32,
         help=(
             "Cap ColQwen2.5 adaptive row-mean pooling to at most this many vectors. "
-            "If omitted (default), no cap is applied (use all effective rows). "
-            "If <= 0, treated as no cap."
+            "Default: 32 (legacy behavior). "
+            "If <= 0, treated as no cap (use all effective rows)."
+        ),
+    )
+    parser.add_argument(
+        "--pooling-windows",
+        "--pooling_windows",
+        type=int,
+        nargs="+",
+        default=None,
+        help=(
+            "Experimental pooling window size(s). Provide one int to override the default window, "
+            "or multiple ints to index/store multiple experimental vectors. "
+            "When multiple are provided, vectors are stored as 'experimental_pooling_{k}' and "
+            "the canonical 'experimental_pooling' aliases the first provided k."
         ),
     )
     payload_group = parser.add_mutually_exclusive_group()
@@ -1204,6 +1280,16 @@ def main() -> None:
             "standard_pooling uses Qdrant named vector 'mean_pooling'. "
             "experimental_pooling uses Qdrant named vector 'experimental_pooling'. "
             "global uses Qdrant named vector 'global_pooling'."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-pooling-k",
+        "--experimental_pooling_k",
+        type=int,
+        default=None,
+        help=(
+            "When using an experimental stage1-mode, select which indexed experimental vector to use "
+            "(Qdrant named vector: 'experimental_pooling_{k}'). If omitted, uses 'experimental_pooling'."
         ),
     )
     parser.add_argument(
@@ -1477,6 +1563,7 @@ def main() -> None:
                 crop_empty_preserve_border_px=int(args.crop_empty_preserve_border_px),
                 crop_empty_uniform_std_threshold=float(args.crop_empty_uniform_std_threshold),
                 max_mean_pool_vectors=args.max_mean_pool_vectors,
+                pooling_windows=args.pooling_windows,
                 no_cloudinary=bool(args.no_cloudinary),
                 cloudinary_folder=str(args.cloudinary_folder),
                 retry_failures=bool(args.retry_failures),
@@ -1568,6 +1655,14 @@ def main() -> None:
             print(f"⚠️ ensure-in-ram failed: {type(e).__name__}: {e}")
             sys.stdout.flush()
 
+    exp_vector_name = "experimental_pooling"
+    if (
+        args.experimental_pooling_k is not None
+        and str(args.stage1_mode) in ("pooled_query_vs_experimental_pooling", "tokens_vs_experimental_pooling")
+        and str(args.mode) in ("two_stage", "three_stage")
+    ):
+        exp_vector_name = f"experimental_pooling_{int(args.experimental_pooling_k)}"
+
     retriever = MultiVectorRetriever(
         collection_name=args.collection,
         embedder=embedder,
@@ -1584,7 +1679,21 @@ def main() -> None:
         request_timeout=int(args.qdrant_timeout),
         max_retries=int(args.qdrant_retries),
         retry_sleep=float(args.qdrant_retry_sleep),
+        experimental_vector_name=exp_vector_name,
     )
+
+    if (
+        str(args.stage1_mode) in ("pooled_query_vs_experimental_pooling", "tokens_vs_experimental_pooling")
+        and str(args.mode) in ("two_stage", "three_stage")
+    ):
+        existing_vectors = _collection_vector_names(client=retriever.client, collection_name=str(args.collection))
+        if exp_vector_name not in existing_vectors:
+            candidates = sorted([v for v in existing_vectors if str(v).startswith("experimental_pooling")])
+            raise ValueError(
+                f"Requested experimental vector '{exp_vector_name}' is not present in the collection. "
+                f"Available experimental vectors: {candidates or '[]'}. "
+                "Re-index with --pooling-windows (and --recreate) to add it."
+            )
 
     metrics_by_dataset: Dict[str, Dict[str, float]] = {}
     dataset_errors: Dict[str, str] = {}
@@ -1630,6 +1739,11 @@ def main() -> None:
             "qdrant_retries": int(args.qdrant_retries),
             "qdrant_retry_sleep": float(args.qdrant_retry_sleep),
             "full_scan_threshold": int(args.full_scan_threshold),
+            "max_mean_pool_vectors": int(args.max_mean_pool_vectors)
+            if args.max_mean_pool_vectors is not None
+            else None,
+            "pooling_windows": args.pooling_windows,
+            "experimental_pooling_k": args.experimental_pooling_k,
             "eval_wall_time_s": float(max(time.time() - eval_started_at, 0.0)),
             "metrics": single_metrics,
             "metrics_by_dataset": metrics_by_dataset,

@@ -736,6 +736,16 @@ def main() -> None:
             "tokens_vs_experimental",
         ],
     )
+    parser.add_argument(
+        "--experimental-pooling-k",
+        "--experimental_pooling_k",
+        type=int,
+        default=None,
+        help=(
+            "When using an experimental stage1-mode, select which indexed experimental vector to use "
+            "(Qdrant named vector: 'experimental_pooling_{k}'). If omitted, uses 'experimental_pooling'."
+        ),
+    )
     parser.add_argument("--output", type=str, default="results/qdrant_vidore_tatdqa_test.json")
 
     args = parser.parse_args()
@@ -806,12 +816,22 @@ def main() -> None:
                 full_scan_threshold=args.full_scan_threshold,
             )
 
+    exp_vector_name = "experimental_pooling"
+    if (
+        args.experimental_pooling_k is not None
+        and str(args.stage1_mode)
+        in ("pooled_query_vs_experimental_pooling", "tokens_vs_experimental_pooling")
+        and str(args.mode) in ("two_stage", "three_stage")
+    ):
+        exp_vector_name = f"experimental_pooling_{int(args.experimental_pooling_k)}"
+
     retriever = MultiVectorRetriever(
         collection_name=args.collection,
         embedder=embedder,
         qdrant_url=qdrant_url,
         qdrant_api_key=qdrant_api_key,
         prefer_grpc=args.prefer_grpc,
+        experimental_vector_name=exp_vector_name,
     )
 
     metrics = _evaluate(

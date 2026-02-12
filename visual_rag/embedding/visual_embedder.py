@@ -785,6 +785,7 @@ class VisualEmbedder:
         *,
         target_vectors: Optional[int] = 32,
         mean_pool: Optional[np.ndarray] = None,
+        window_size: Optional[int] = None,
     ) -> np.ndarray:
         from visual_rag.embedding.pooling import (
             colpali_experimental_pooling_from_rows,
@@ -833,7 +834,8 @@ class VisualEmbedder:
             )
         )
         # For ColPali we usually expect fixed 32 rows; for ColQwen2.5 the row count is dynamic (<= target_vectors).
-        window = 5 if is_colqwen25 else 3
+        # Allow overriding the experimental pooling window size; default matches legacy behavior.
+        window = int(window_size) if window_size is not None else (5 if is_colqwen25 else 3)
         return colpali_experimental_pooling_from_rows(
             rows, window_size=window, output_dtype=self.output_dtype
         )

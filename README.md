@@ -20,7 +20,7 @@ This repo contains:
 
 - **Modular**: PDF → images, embedding, Qdrant indexing, retrieval can be used independently.
 - **Multi-stage retrieval**: two-stage and three-stage retrieval modes built for Qdrant named vectors.
-- **Model-aware embedding**: ColSmol + ColPali support behind a single `VisualEmbedder` interface.
+- **Model-aware embedding**: ColSmol, ColPali, and ColQwen2/2.5 support behind a single `VisualEmbedder` interface.
 - **Token hygiene**: query special-token filtering by default for more stable MaxSim behavior.
 - **Practical pipelines**: robust indexing, retries, optional Cloudinary image URLs, evaluation reporting.
 
@@ -33,7 +33,7 @@ pip install visual-rag-toolkit
 # With specific features
 pip install visual-rag-toolkit[ui]           # Streamlit demo dependencies
 pip install visual-rag-toolkit[qdrant]       # Vector database
-pip install visual-rag-toolkit[embedding]    # ColSmol/ColPali embedding support
+pip install visual-rag-toolkit[embedding]    # ColSmol/ColPali/ColQwen2(.5) embedding support
 pip install visual-rag-toolkit[cloudinary]   # Image CDN
 
 # All dependencies
@@ -46,6 +46,8 @@ pip install visual-rag-toolkit[all]
 
 - macOS: `brew install poppler`
 - Ubuntu/Debian: `sudo apt-get update && sudo apt-get install -y poppler-utils`
+
+**ColQwen2.5 note:** `vidore/colqwen2.5-v0.2` requires `transformers>=4.45.0` and `colpali-engine>=0.3.7` (installing ColPali/ColQwen from source may be required for the latest processors).
 
 ## 🚀 Quick Start
 
@@ -68,7 +70,7 @@ results = retriever.search_server_side(
     query_embedding=q,
     top_k=10,
     prefetch_k=256,
-    stage1_mode="tokens_vs_experimental",  # or: tokens_vs_tiles / pooled_query_vs_tiles / pooled_query_vs_global
+    stage1_mode="tokens_vs_experimental_pooling",  # or: tokens_vs_standard_pooling / pooled_query_vs_standard_pooling / pooled_query_vs_global
 )
 
 for r in results[:3]:
@@ -264,7 +266,7 @@ python -m benchmarks.vidore_beir_qdrant.run_qdrant_beir \
   --datasets vidore/esg_reports_v2 vidore/biomedical_lectures_v2 \
   --collection YOUR_COLLECTION \
   --mode two_stage \
-  --stage1-mode tokens_vs_experimental \
+  --stage1-mode tokens_vs_experimental_pooling \
   --prefetch-k 256 \
   --top-k 100 \
   --evaluation-scope union

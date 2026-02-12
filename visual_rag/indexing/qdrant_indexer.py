@@ -135,6 +135,7 @@ class QdrantIndexer:
         enable_quantization: bool = False,
         indexing_threshold: int = 20000,
         full_scan_threshold: int = 0,
+        experimental_vector_names: Optional[List[str]] = None,
     ) -> bool:
         """
         Create collection with multi-vector support.
@@ -143,6 +144,7 @@ class QdrantIndexer:
         - initial: Full multi-vector embeddings (num_patches × dim)
         - mean_pooling: Tile-level pooled vectors (num_tiles × dim)
         - experimental_pooling: Experimental multi-vector pooling (varies by model)
+        - experimental_pooling_{k}: Optional additional experimental poolings with different window sizes
         - global_pooling: Single vector pooled representation (dim)
 
         Args:
@@ -154,11 +156,40 @@ class QdrantIndexer:
         Returns:
             True if created, False if already existed
         """
+        # Normalize requested experimental vector names (always include canonical "experimental_pooling")
+        exp_names: List[str] = ["experimental_pooling"]
+        if experimental_vector_names:
+            for n in experimental_vector_names:
+                s = str(n).strip()
+                if not s:
+                    continue
+                exp_names.append(s)
+        # Unique while preserving order
+        seen = set()
+        exp_names = [x for x in exp_names if not (x in seen or seen.add(x))]
+
         if self.collection_exists():
             if force_recreate:
                 logger.info(f"🗑️ Deleting existing collection: {self.collection_name}")
                 self.client.delete_collection(self.collection_name)
             else:
+                # Verify the collection has the required named vectors.
+                try:
+                    info = self.client.get_collection(self.collection_name)
+                    vectors = getattr(getattr(info, "config", None), "params", None)
+                    vectors = getattr(vectors, "vectors", None)
+                    existing = set()
+                    if isinstance(vectors, dict):
+                        existing = set(str(k) for k in vectors.keys())
+                    missing = set(exp_names) - existing
+                    if missing:
+                        raise ValueError(
+                            "Collection exists but is missing required experimental vectors: "
+                            f"{sorted(missing)}. Recreate the collection to add new named vectors."
+                        )
+                except Exception as e:
+                    # If we cannot verify, keep legacy behavior.
+                    logger.debug(f"Could not verify existing vector schema: {e}")
                 logger.info(f"✅ Collection already exists: {self.collection_name}")
                 return False
 
@@ -190,13 +221,6 @@ class QdrantIndexer:
                 multivector_config=multivector_config,
                 datatype=datatype,
             ),
-            "experimental_pooling": VectorParams(
-                size=embedding_dim,
-                distance=Distance.COSINE,
-                on_disk=False,
-                multivector_config=multivector_config,
-                datatype=datatype,
-            ),
             "global_pooling": VectorParams(
                 size=embedding_dim,
                 distance=Distance.COSINE,
@@ -204,6 +228,14 @@ class QdrantIndexer:
                 datatype=datatype,
             ),
         }
+        for exp_name in exp_names:
+            vectors_config[str(exp_name)] = VectorParams(
+                size=embedding_dim,
+                distance=Distance.COSINE,
+                on_disk=False,
+                multivector_config=multivector_config,
+                datatype=datatype,
+            )
 
         self.client.create_collection(
             collection_name=self.collection_name,
@@ -393,10 +425,21 @@ class QdrantIndexer:
                 mean_pooling = np.array(p["tile_pooled_embedding"], dtype=np.float32).astype(
                     self._np_vector_dtype, copy=False
                 )
-                experimental_pooling = np.array(
-                    p["experimental_pooled_embedding"], dtype=np.float32
-                ).astype(self._np_vector_dtype, copy=False)
                 global_pooling = global_pooled.astype(self._np_vector_dtype, copy=False)
+
+                exp_val = p.get("experimental_pooled_embedding")
+                exp_vectors: Dict[str, Any] = {}
+                if isinstance(exp_val, dict):
+                    for k, v in exp_val.items():
+                        if v is None:
+                            continue
+                        exp_vectors[str(k)] = np.array(v, dtype=np.float32).astype(
+                            self._np_vector_dtype, copy=False
+                        )
+                elif exp_val is not None:
+                    exp_vectors["experimental_pooling"] = np.array(exp_val, dtype=np.float32).astype(
+                        self._np_vector_dtype, copy=False
+                    )
 
                 qdrant_points.append(
                     qdrant_models.PointStruct(
@@ -404,8 +447,8 @@ class QdrantIndexer:
                         vector={
                             "initial": _to_list(initial),
                             "mean_pooling": _to_list(mean_pooling),
-                            "experimental_pooling": _to_list(experimental_pooling),
                             "global_pooling": _to_list(global_pooling),
+                            **{name: _to_list(val) for name, val in exp_vectors.items()},
                         },
                         payload=p["metadata"],
                     )

@@ -143,6 +143,26 @@ def main() -> None:
     )
     ap.add_argument("--limit", type=int, default=0, help="0 means no limit")
     ap.add_argument("--sleep-sec", type=float, default=0.0)
+    ap.add_argument(
+        "--max-mean-pool-vectors",
+        type=int,
+        default=32,
+        help=(
+            "Cap adaptive mean pooling rows to at most this many vectors. "
+            "Default: 32. If <= 0, no cap is applied (use all effective rows)."
+        ),
+    )
+    ap.add_argument(
+        "--pooling-windows",
+        "--pooling_windows",
+        type=int,
+        nargs="+",
+        default=None,
+        help=(
+            "Experimental pooling window size(s). If multiple are provided, vectors are updated as "
+            "'experimental_pooling_{k}' and the canonical 'experimental_pooling' aliases the first provided k."
+        ),
+    )
     args = ap.parse_args()
 
     _maybe_load_dotenv()
@@ -159,6 +179,35 @@ def main() -> None:
         timeout=float(args.timeout),
         check_compatibility=False,
     )
+
+    # Requested experimental window sizes and required named vectors
+    ks = args.pooling_windows if args.pooling_windows else [5]
+    seen = set()
+    ks_norm = []
+    for k in ks:
+        try:
+            ki = int(k)
+        except Exception:
+            continue
+        if ki <= 0 or ki in seen:
+            continue
+        seen.add(ki)
+        ks_norm.append(ki)
+    if not ks_norm:
+        ks_norm = [5]
+    exp_names = ["experimental_pooling"] + [f"experimental_pooling_{k}" for k in ks_norm]
+    try:
+        info = client.get_collection(str(args.collection))
+        vectors = info.config.params.vectors or {}
+        existing = set(str(k) for k in vectors.keys()) if isinstance(vectors, dict) else set()
+    except Exception:
+        existing = set()
+    missing = set(["mean_pooling", "global_pooling"] + exp_names) - existing if existing else set()
+    if missing:
+        raise SystemExit(
+            f"Collection is missing required named vectors: {sorted(missing)}. "
+            "Recreate/rebuild the collection schema to include them before recomputing."
+        )
 
     flt = qm.Filter(
         must=[qm.FieldCondition(key="dataset", match=qm.MatchValue(value=str(args.dataset)))]
@@ -258,14 +307,24 @@ def main() -> None:
                 emb,
                 grid_h=int(grid_h),
                 grid_w=int(grid_w),
-                target_rows=32,  # IMPORTANT: fixed row count for good prefetch recall
+                target_rows=(
+                    int(grid_h)
+                    if int(args.max_mean_pool_vectors) <= 0
+                    else min(int(args.max_mean_pool_vectors), int(grid_h))
+                ),
                 output_dtype=np.float32,
             )
-            exp_pool = colpali_experimental_pooling_from_rows(
-                mean_pool,
-                window_size=5,
-                output_dtype=np.float32,
-            )
+            exp_by_name = {}
+            canonical_k = int(ks_norm[0])
+            for k in ks_norm:
+                exp = colpali_experimental_pooling_from_rows(
+                    mean_pool,
+                    window_size=int(k),
+                    output_dtype=np.float32,
+                )
+                exp_by_name[f"experimental_pooling_{int(k)}"] = exp
+                if int(k) == canonical_k:
+                    exp_by_name["experimental_pooling"] = exp
             glob = mean_pool.mean(axis=0).astype(np.float32)
 
             pv_batch.append(
@@ -273,8 +332,8 @@ def main() -> None:
                     id=pid,
                     vector={
                         "mean_pooling": mean_pool.tolist(),
-                        "experimental_pooling": exp_pool.tolist(),
                         "global_pooling": glob.tolist(),
+                        **{name: vec.tolist() for name, vec in exp_by_name.items()},
                     },
                 )
             )

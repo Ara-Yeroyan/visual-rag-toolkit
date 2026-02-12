@@ -114,6 +114,28 @@ def cmd_process(args):
         processor_speed=str(getattr(args, "processor_speed", "fast")),
     )
 
+    # Experimental pooling windows (for additional Qdrant named vectors)
+    model_lower = (model_name or "").lower()
+    is_colqwen25 = "colqwen2.5" in model_lower or "colqwen2_5" in model_lower
+    default_k = 5 if is_colqwen25 else 3
+    ks = args.pooling_windows if getattr(args, "pooling_windows", None) else [default_k]
+    seen_ks = set()
+    ks_norm = []
+    for k in ks:
+        try:
+            ki = int(k)
+        except Exception:
+            continue
+        if ki <= 0:
+            continue
+        if ki in seen_ks:
+            continue
+        seen_ks.add(ki)
+        ks_norm.append(ki)
+    if not ks_norm:
+        ks_norm = [default_k]
+    experimental_vector_names = [f"experimental_pooling_{int(k)}" for k in ks_norm]
+
     # Initialize Qdrant indexer
     qdrant_url = (
         os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL")
@@ -139,7 +161,10 @@ def cmd_process(args):
     )
 
     # Create collection if needed
-    indexer.create_collection(force_recreate=args.force_recreate)
+    indexer.create_collection(
+        force_recreate=args.force_recreate,
+        experimental_vector_names=experimental_vector_names,
+    )
     inferred_fields = []
     inferred_fields.append({"field": "filename", "type": "keyword"})
     inferred_fields.append({"field": "page_number", "type": "integer"})
@@ -194,6 +219,8 @@ def cmd_process(args):
             getattr(args, "crop_empty_percentage_to_remove", 0.9)
         ),
         crop_empty_remove_page_number=bool(getattr(args, "crop_empty_remove_page_number", False)),
+        max_mean_pool_vectors=getattr(args, "max_mean_pool_vectors", 32),
+        pooling_windows=getattr(args, "pooling_windows", None),
     )
 
     # Process PDFs
@@ -271,8 +298,35 @@ def cmd_search(args):
         grpc_port=grpc_port,
         check_compatibility=False,
     )
-    two_stage = TwoStageRetriever(client, args.collection)
+
+    exp_vector_name = "experimental_pooling"
+    if getattr(args, "experimental_pooling_k", None) is not None:
+        if str(args.stage1_mode) in ("pooled_query_vs_experimental_pooling", "tokens_vs_experimental_pooling"):
+            exp_vector_name = f"experimental_pooling_{int(args.experimental_pooling_k)}"
+        else:
+            logger.warning(
+                "--experimental-pooling-k was provided but stage1-mode is not experimental; ignoring."
+            )
+
+    two_stage = TwoStageRetriever(
+        client, args.collection, experimental_vector_name=str(exp_vector_name)
+    )
     single_stage = SingleStageRetriever(client, args.collection)
+
+    if str(args.stage1_mode) in ("pooled_query_vs_experimental_pooling", "tokens_vs_experimental_pooling"):
+        try:
+            info = client.get_collection(str(args.collection))
+            vectors = info.config.params.vectors or {}
+            existing = set(str(k) for k in vectors.keys()) if isinstance(vectors, dict) else set()
+        except Exception:
+            existing = set()
+        if existing and exp_vector_name not in existing:
+            candidates = sorted([v for v in existing if str(v).startswith("experimental_pooling")])
+            raise SystemExit(
+                f"Requested experimental vector '{exp_vector_name}' is not present in the collection. "
+                f"Available experimental vectors: {candidates or '[]'}. "
+                "Re-index with --pooling-windows (and --force-recreate) to add it."
+            )
 
     # Embed query
     logger.info(f"🔍 Query: {args.query}")
@@ -504,6 +558,27 @@ Examples:
         help="Datatype for vectors stored in Qdrant (default: float16).",
     )
     process_parser.add_argument(
+        "--max-mean-pool-vectors",
+        type=int,
+        default=32,
+        help=(
+            "Cap ColQwen2.5 adaptive row-mean pooling to at most this many vectors. "
+            "Default: 32 (legacy behavior). If <= 0, treated as no cap."
+        ),
+    )
+    process_parser.add_argument(
+        "--pooling-windows",
+        "--pooling_windows",
+        type=int,
+        nargs="+",
+        default=None,
+        help=(
+            "Experimental pooling window size(s). Provide one int to override the default window, "
+            "or multiple ints to index/store multiple experimental vectors as "
+            "'experimental_pooling_{k}' (and 'experimental_pooling' aliases the first provided k)."
+        ),
+    )
+    process_parser.add_argument(
         "--processor-speed",
         type=str,
         default="fast",
@@ -575,6 +650,16 @@ Examples:
             "tokens_vs_experimental",
         ],
         help="Stage 1 mode for two-stage retrieval",
+    )
+    search_parser.add_argument(
+        "--experimental-pooling-k",
+        "--experimental_pooling_k",
+        type=int,
+        default=None,
+        help=(
+            "When using an experimental stage1-mode, select which indexed experimental vector to use "
+            "(Qdrant named vector: 'experimental_pooling_{k}'). If omitted, uses 'experimental_pooling'."
+        ),
     )
     search_parser.add_argument("--year", type=int, help="Filter by year")
     search_parser.add_argument("--source", type=str, help="Filter by source")

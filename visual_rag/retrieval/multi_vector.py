@@ -47,6 +47,7 @@ class MultiVectorRetriever:
         retry_sleep: float = 0.5,
         qdrant_client=None,
         embedder: Optional[VisualEmbedder] = None,
+        experimental_vector_name: str = "experimental_pooling",
     ):
         if qdrant_client is None:
             self._maybe_load_dotenv()
@@ -110,6 +111,7 @@ class MultiVectorRetriever:
         self._two_stage = TwoStageRetriever(
             qdrant_client=qdrant_client,
             collection_name=collection_name,
+            experimental_vector_name=str(experimental_vector_name),
             request_timeout=request_timeout,
             max_retries=max_retries,
             retry_sleep=retry_sleep,
@@ -117,6 +119,7 @@ class MultiVectorRetriever:
         self._three_stage = ThreeStageRetriever(
             qdrant_client=qdrant_client,
             collection_name=collection_name,
+            experimental_vector_name=str(experimental_vector_name),
             request_timeout=request_timeout,
             max_retries=max_retries,
             retry_sleep=retry_sleep,

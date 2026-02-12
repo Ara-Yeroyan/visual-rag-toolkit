@@ -56,10 +56,15 @@ def _chunks(seq: Sequence[Any], n: int) -> List[Sequence[Any]]:
     return [seq[i : i + n] for i in range(0, len(seq), n)]
 
 
-def _vectors_config(*, embedding_dim: int, vector_dtype: str) -> Dict[str, qm.VectorParams]:
+def _vectors_config(
+    *,
+    embedding_dim: int,
+    vector_dtype: str,
+    experimental_vector_names: Optional[List[str]] = None,
+) -> Dict[str, qm.VectorParams]:
     datatype = qm.Datatype.FLOAT16 if vector_dtype == "float16" else qm.Datatype.FLOAT32
     multivector_config = qm.MultiVectorConfig(comparator=qm.MultiVectorComparator.MAX_SIM)
-    return {
+    vectors = {
         "initial": qm.VectorParams(
             size=int(embedding_dim),
             distance=qm.Distance.COSINE,
@@ -88,6 +93,21 @@ def _vectors_config(*, embedding_dim: int, vector_dtype: str) -> Dict[str, qm.Ve
             datatype=datatype,
         ),
     }
+    if experimental_vector_names:
+        for n in experimental_vector_names:
+            s = str(n).strip()
+            if not s:
+                continue
+            if s in vectors:
+                continue
+            vectors[s] = qm.VectorParams(
+                size=int(embedding_dim),
+                distance=qm.Distance.COSINE,
+                on_disk=False,
+                multivector_config=multivector_config,
+                datatype=datatype,
+            )
+    return vectors
 
 
 def _scroll_points(
@@ -118,6 +138,7 @@ def _clone(
     recreate_dest: bool,
     scroll_limit: int,
     upsert_batch_size: int,
+    experimental_vector_names: Optional[List[str]],
 ) -> int:
     if recreate_dest:
         try:
@@ -128,7 +149,11 @@ def _clone(
     # Create destination collection
     client.create_collection(
         collection_name=dest,
-        vectors_config=_vectors_config(embedding_dim=embedding_dim, vector_dtype=vector_dtype),
+        vectors_config=_vectors_config(
+            embedding_dim=embedding_dim,
+            vector_dtype=vector_dtype,
+            experimental_vector_names=experimental_vector_names,
+        ),
         optimizers_config=qm.OptimizersConfigDiff(indexing_threshold=int(indexing_threshold)),
     )
     # Keep filename payload index (cheap; useful for skip_existing)
@@ -197,9 +222,34 @@ def main() -> None:
     parser.add_argument("--scroll-limit", type=int, default=256)
     parser.add_argument("--upsert-batch-size", type=int, default=64)
     parser.add_argument(
+        "--pooling-windows",
+        "--pooling_windows",
+        type=int,
+        nargs="+",
+        default=None,
+        help=(
+            "If provided, include additional experimental named vectors "
+            "('experimental_pooling_{k}') in the rebuilt collection schema."
+        ),
+    )
+    parser.add_argument(
         "--keep-temp", action="store_true", help="Do not delete temp collection at the end"
     )
     args = parser.parse_args()
+
+    ks = args.pooling_windows or []
+    seen = set()
+    ks_norm: List[int] = []
+    for k in ks:
+        try:
+            ki = int(k)
+        except Exception:
+            continue
+        if ki <= 0 or ki in seen:
+            continue
+        seen.add(ki)
+        ks_norm.append(ki)
+    experimental_vector_names = [f"experimental_pooling_{k}" for k in ks_norm]
 
     if DOTENV_AVAILABLE:
         load_dotenv()
@@ -236,6 +286,7 @@ def main() -> None:
         recreate_dest=True,
         scroll_limit=int(args.scroll_limit),
         upsert_batch_size=int(args.upsert_batch_size),
+        experimental_vector_names=experimental_vector_names,
     )
     temp_info = client.get_collection(temp)
     print(
@@ -250,7 +301,9 @@ def main() -> None:
     client.create_collection(
         collection_name=args.collection,
         vectors_config=_vectors_config(
-            embedding_dim=int(args.embedding_dim), vector_dtype=str(args.vector_dtype)
+            embedding_dim=int(args.embedding_dim),
+            vector_dtype=str(args.vector_dtype),
+            experimental_vector_names=experimental_vector_names,
         ),
         optimizers_config=qm.OptimizersConfigDiff(indexing_threshold=int(args.indexing_threshold)),
     )
@@ -274,6 +327,7 @@ def main() -> None:
         recreate_dest=False,
         scroll_limit=int(args.scroll_limit),
         upsert_batch_size=int(args.upsert_batch_size),
+        experimental_vector_names=experimental_vector_names,
     )
 
     final_info = client.get_collection(args.collection)
