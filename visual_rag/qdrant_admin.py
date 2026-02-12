@@ -33,23 +33,12 @@ def _resolve_qdrant_connection(
     import os
 
     _maybe_load_dotenv()
-    resolved_url = (
-        url
-        or os.getenv("SIGIR_QDRANT_URL")
-        or os.getenv("DEST_QDRANT_URL")
-        or os.getenv("QDRANT_URL")
-    )
+    resolved_url = url or os.getenv("QDRANT_URL")
     if not resolved_url:
         raise ValueError(
-            "Qdrant URL not set (pass url= or set SIGIR_QDRANT_URL/DEST_QDRANT_URL/QDRANT_URL)."
+            "Qdrant URL not set (pass url= or set QDRANT_URL)."
         )
-    resolved_key = (
-        api_key
-        or os.getenv("SIGIR_QDRANT_KEY")
-        or os.getenv("SIGIR_QDRANT_API_KEY")
-        or os.getenv("DEST_QDRANT_API_KEY")
-        or os.getenv("QDRANT_API_KEY")
-    )
+    resolved_key = api_key or os.getenv("QDRANT_API_KEY")
     return QdrantConnection(url=str(resolved_url), api_key=resolved_key)
 
 

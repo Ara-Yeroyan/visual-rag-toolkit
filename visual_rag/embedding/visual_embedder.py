@@ -225,15 +225,22 @@ class VisualEmbedder:
                     "  pip install git+https://github.com/illuin-tech/colpali\n"
                     "or ensure colpali-engine>=0.3.7 is installed."
                 )
-            attn_implementation = None
-            if self.device != "cpu":
-                try:
-                    from transformers.utils.import_utils import is_flash_attn_2_available
+            # Attention backend selection:
+            # - CUDA: prefer FlashAttention2 when available
+            # - MPS: default to eager (SDPA on MPS can produce NaNs for some batched query shapes)
+            # - Allow override via env var.
+            attn_implementation = os.getenv("VISUALRAG_ATTN_IMPLEMENTATION") or None
+            if attn_implementation is None:
+                if str(self.device) == "mps":
+                    attn_implementation = "eager"
+                elif self.device != "cpu":
+                    try:
+                        from transformers.utils.import_utils import is_flash_attn_2_available
 
-                    if is_flash_attn_2_available():
-                        attn_implementation = "flash_attention_2"
-                except Exception:
-                    pass
+                        if is_flash_attn_2_available():
+                            attn_implementation = "flash_attention_2"
+                    except Exception:
+                        pass
             self._model = ColQwen2_5.from_pretrained(
                 self.model_name,
                 torch_dtype=self.torch_dtype,
@@ -362,6 +369,20 @@ class VisualEmbedder:
         if embedding.dim() == 3:
             embedding = embedding.squeeze(0)
 
+        # Safety: surface NaN/Inf early for single-query embeddings
+        try:
+            if bool(torch.isnan(embedding).any()) or bool(torch.isinf(embedding).any()):
+                logger.error(
+                    "NaN/Inf detected in single query embedding. "
+                    "model=%s device=%s torch_dtype=%s query=%r",
+                    str(self.model_name),
+                    str(self.device),
+                    str(self.torch_dtype),
+                    str(query_text)[:2000],
+                )
+        except Exception:
+            pass
+
         if should_filter:
             # Filter special tokens based on attention mask
             attention_mask = processed.get("attention_mask")
@@ -405,16 +426,49 @@ class VisualEmbedder:
         )
         batch_size = batch_size or self.batch_size
 
+        # Optional: reduce padding variance by bucketing queries by length (helps on some backends).
+        # Controlled via VISUALRAG_SORT_QUERIES_BY_LENGTH=1|0 (default: 1 on MPS+ColQwen2.5, else 0).
+        model_lower = (self.model_name or "").lower()
+        is_colqwen25 = "colqwen2.5" in model_lower or "colqwen2_5" in model_lower
+        env_sort = os.getenv("VISUALRAG_SORT_QUERIES_BY_LENGTH")
+        if env_sort is None:
+            sort_by_len = bool(self.device == "mps" and is_colqwen25)
+        else:
+            sort_by_len = str(env_sort).strip().lower() not in ("0", "false", "no", "off")
+
+        if sort_by_len and len(query_texts) > 1:
+            tok = getattr(self.processor, "tokenizer", None)
+            try:
+                if tok is not None:
+                    lengths = [
+                        len(tok(q, add_special_tokens=True).get("input_ids", [])) for q in query_texts
+                    ]
+                else:
+                    lengths = [len(str(q)) for q in query_texts]
+                order = sorted(range(len(query_texts)), key=lambda idx: lengths[idx])
+                inv = [0] * len(order)
+                for pos, idx in enumerate(order):
+                    inv[idx] = pos
+                query_texts_sorted = [query_texts[i] for i in order]
+            except Exception:
+                query_texts_sorted = query_texts
+                order = None
+                inv = None
+        else:
+            query_texts_sorted = query_texts
+            order = None
+            inv = None
+
         outputs: List[torch.Tensor] = []
         fallback_count = 0
         nan_log_path: Optional[Path] = None
         nan_logged = 0
-        iterator = range(0, len(query_texts), batch_size)
+        iterator = range(0, len(query_texts_sorted), batch_size)
         if show_progress:
             iterator = tqdm(iterator, desc="📝 Embedding queries", unit="batch")
 
         for i in iterator:
-            batch = query_texts[i : i + batch_size]
+            batch = query_texts_sorted[i : i + batch_size]
             with torch.no_grad():
                 processed = self.processor.process_queries(batch).to(self.model.device)
                 batch_embeddings = self.model(**processed)
@@ -512,7 +566,11 @@ class VisualEmbedder:
                 logger.warning(
                     "NaN/Inf samples written to %s (%d rows).", str(nan_log_path), int(nan_logged)
                 )
-        return outputs
+        if order is None or inv is None:
+            return outputs
+        # Unsort back to the caller's original query order.
+        out_unsorted: List[torch.Tensor] = [outputs[inv[i]] for i in range(len(inv))]
+        return out_unsorted
 
     def embed_images(
         self,
@@ -786,10 +844,12 @@ class VisualEmbedder:
         target_vectors: Optional[int] = 32,
         mean_pool: Optional[np.ndarray] = None,
         window_size: Optional[int] = None,
+        kernel: Optional[str] = None,
     ) -> np.ndarray:
         from visual_rag.embedding.pooling import (
             colpali_experimental_pooling_from_rows,
             colsmol_experimental_pooling,
+            weighted_row_smoothing_same_length,
         )
 
         model_lower = (self.model_name or "").lower()
@@ -833,11 +893,26 @@ class VisualEmbedder:
                 visual_np, token_info, target_vectors=target_vectors
             )
         )
-        # For ColPali we usually expect fixed 32 rows; for ColQwen2.5 the row count is dynamic (<= target_vectors).
-        # Allow overriding the experimental pooling window size; default matches legacy behavior.
-        window = int(window_size) if window_size is not None else (5 if is_colqwen25 else 3)
-        return colpali_experimental_pooling_from_rows(
-            rows, window_size=window, output_dtype=self.output_dtype
+        # Kernel selection:
+        # - legacy: ColPali-style conv pooling that produces N+2r rows (historical behavior)
+        # - uniform/triangular/gaussian: weighted smoothing that preserves row count (N -> N)
+        k = (kernel or ("gaussian" if is_colqwen25 else "legacy")).lower().strip()
+        if k in ("legacy", "legacy_conv", "conv"):
+            # Allow overriding window size; keep legacy defaults.
+            window = int(window_size) if window_size is not None else (5 if is_colqwen25 else 3)
+            return colpali_experimental_pooling_from_rows(
+                rows, window_size=window, output_dtype=self.output_dtype
+            )
+
+        # Weighted same-length smoothing defaults:
+        # - ColQwen2.5: gaussian k=3
+        # - ColPali: user-controlled; default to k=3 to mirror legacy scale
+        window = int(window_size) if window_size is not None else 3
+        return weighted_row_smoothing_same_length(
+            rows,
+            window_size=window,
+            kernel=("gaussian" if k == "gaussian" else ("triangular" if k == "triangular" else "uniform")),
+            output_dtype=self.output_dtype,
         )
 
 

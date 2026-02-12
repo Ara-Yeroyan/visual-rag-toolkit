@@ -8,7 +8,7 @@ Provides:
 """
 
 import logging
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -283,6 +283,156 @@ def colpali_experimental_pooling_from_rows(
         lo = max(0, center - r)
         hi = min(n - 1, center + r)
         out[i] = rows[lo : hi + 1].mean(axis=0)
+    return out.astype(out_dtype)
+
+
+def weighted_row_smoothing_same_length(
+    row_vectors: Union[torch.Tensor, np.ndarray],
+    *,
+    window_size: int = 3,
+    kernel: Literal["uniform", "triangular", "gaussian"] = "gaussian",
+    sigma: Optional[float] = None,
+    output_dtype: Optional[np.dtype] = None,
+) -> np.ndarray:
+    """
+    Smooth row vectors with a weighted 1D kernel, returning the SAME number of rows (N -> N).
+
+    Unlike `colpali_experimental_pooling_from_rows`, this does NOT add extra border vectors.
+    It is designed to be a better "experimental pooling" for backbones that already include
+    learned local mixing (e.g. Qwen2/2.5-VL PatchMerger).
+
+    Supports any positive `window_size` (odd or even). Even sizes are centered between two rows.
+    """
+    out_dtype = _infer_output_dtype(row_vectors, output_dtype)
+    if isinstance(row_vectors, torch.Tensor):
+        if row_vectors.dtype == torch.bfloat16:
+            rows = row_vectors.cpu().float().numpy()
+        else:
+            rows = row_vectors.cpu().numpy().astype(np.float32)
+    else:
+        rows = np.array(row_vectors, dtype=np.float32)
+
+    n, dim = rows.shape
+    if n < 1:
+        raise ValueError("row_vectors must be non-empty")
+
+    k = int(window_size)
+    if k < 1:
+        raise ValueError("window_size must be >= 1")
+    if k == 1 or n == 1:
+        return rows.astype(out_dtype)
+
+    kernel = str(kernel).lower().strip()
+    if kernel not in ("uniform", "triangular", "gaussian"):
+        raise ValueError(f"Unknown kernel={kernel}. Choose uniform|triangular|gaussian.")
+
+    # Center can be .0 (odd k) or .5 (even k)
+    center = (k - 1) / 2.0
+    positions = np.arange(k, dtype=np.float32)
+    dist = np.abs(positions - center)
+
+    if kernel == "uniform":
+        w = np.ones((k,), dtype=np.float32)
+    elif kernel == "triangular":
+        # Linear decay. For odd k=5: [1,2,3,2,1]. For even k=4: [1.5,2.5,2.5,1.5].
+        w = (center + 1.0) - dist
+        w = np.clip(w, 0.0, None).astype(np.float32)
+    else:  # gaussian
+        # Reasonable default sigma: proportional to radius, but not too tiny for k=2/3.
+        if sigma is None:
+            # radius ~= center; sigma ~= radius/2, but min 0.5
+            sigma_eff = max(0.5, float(center) / 2.0)
+        else:
+            sigma_eff = float(sigma)
+            if sigma_eff <= 0:
+                raise ValueError("sigma must be > 0")
+        w = np.exp(-0.5 * (dist / sigma_eff) ** 2).astype(np.float32)
+
+    # Normalize weights
+    w_sum = float(w.sum())
+    if w_sum <= 0:
+        return rows.astype(out_dtype)
+    w = w / w_sum
+
+    # Window indexing: for each i, take indices [i-left, i-left+k)
+    left = k // 2  # for odd: r; for even: k/2 (slightly "right of center")
+    out = np.zeros((n, dim), dtype=np.float32)
+    for i in range(n):
+        acc = np.zeros((dim,), dtype=np.float32)
+        w_acc = 0.0
+        start = i - left
+        for t in range(k):
+            j = start + t
+            if j < 0 or j >= n:
+                continue
+            wt = float(w[t])
+            acc += wt * rows[j]
+            w_acc += wt
+        if w_acc > 0:
+            out[i] = acc / w_acc
+        else:
+            out[i] = rows[i]
+    return out.astype(out_dtype)
+
+
+def colsmol_tile_4n_pooling_from_tiles(
+    tile_vectors: Union[torch.Tensor, np.ndarray],
+    *,
+    n_rows: int,
+    n_cols: int,
+    has_global: bool = True,
+    include_self: bool = True,
+    output_dtype: Optional[np.dtype] = None,
+) -> np.ndarray:
+    """
+    ColSmol-specific experimental pooling: 2D 4-neighborhood pooling over the tile grid.
+
+    Expects tile vectors ordered row-major for the tile grid, followed by an optional global tile.
+    Returns the same number of vectors as input (grid tiles [+ global]).
+    """
+    out_dtype = _infer_output_dtype(tile_vectors, output_dtype)
+    if isinstance(tile_vectors, torch.Tensor):
+        if tile_vectors.dtype == torch.bfloat16:
+            tiles = tile_vectors.cpu().float().numpy()
+        else:
+            tiles = tile_vectors.cpu().numpy().astype(np.float32)
+    else:
+        tiles = np.array(tile_vectors, dtype=np.float32)
+
+    n_rows = int(n_rows)
+    n_cols = int(n_cols)
+    if n_rows <= 0 or n_cols <= 0:
+        raise ValueError("n_rows and n_cols must be > 0")
+    grid_n = n_rows * n_cols
+    if tiles.shape[0] < grid_n:
+        raise ValueError(
+            f"Expected at least {grid_n} tile vectors for n_rows×n_cols={n_rows}×{n_cols}, got {tiles.shape[0]}"
+        )
+
+    grid = tiles[:grid_n].reshape(n_rows, n_cols, -1)
+    out_grid = np.zeros_like(grid, dtype=np.float32)
+
+    for r in range(n_rows):
+        for c in range(n_cols):
+            neigh = []
+            if include_self:
+                neigh.append(grid[r, c])
+            if r > 0:
+                neigh.append(grid[r - 1, c])
+            if r + 1 < n_rows:
+                neigh.append(grid[r + 1, c])
+            if c > 0:
+                neigh.append(grid[r, c - 1])
+            if c + 1 < n_cols:
+                neigh.append(grid[r, c + 1])
+            out_grid[r, c] = np.stack(neigh, axis=0).mean(axis=0)
+
+    out_list = [out_grid.reshape(grid_n, -1)]
+    if has_global and tiles.shape[0] > grid_n:
+        # Keep global tile unchanged (it already summarizes the page).
+        out_list.append(tiles[grid_n : grid_n + 1])
+
+    out = np.concatenate(out_list, axis=0)
     return out.astype(out_dtype)
 
 

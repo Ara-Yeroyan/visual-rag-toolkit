@@ -96,6 +96,8 @@ class ProcessingPipeline:
         crop_empty_uniform_rowcol_std_threshold: float = 0.0,
         max_mean_pool_vectors: Optional[int] = 32,
         pooling_windows: Optional[List[int]] = None,
+        experimental_pooling_kernel: str = "auto",
+        colsmol_experimental_2d: bool = False,
     ):
         self.embedder = embedder
         self.indexer = indexer
@@ -119,6 +121,8 @@ class ProcessingPipeline:
 
         self.max_mean_pool_vectors = max_mean_pool_vectors
         self.pooling_windows = pooling_windows
+        self.experimental_pooling_kernel = str(experimental_pooling_kernel or "auto")
+        self.colsmol_experimental_2d = bool(colsmol_experimental_2d)
         
         logger.info(f"📊 Embedding strategy: {embedding_strategy}")
         if embedding_strategy == "pooling":
@@ -392,7 +396,15 @@ class ProcessingPipeline:
 
         model_lower = (getattr(self.embedder, "model_name", "") or "").lower()
         is_colqwen25 = "colqwen2.5" in model_lower or "colqwen2_5" in model_lower
+        is_colsmol = "colsmol" in model_lower
+        kernel_arg = str(getattr(self, "experimental_pooling_kernel", "auto") or "auto").lower().strip()
+        if kernel_arg == "auto":
+            kernel = "gaussian" if is_colqwen25 else "legacy"
+        else:
+            kernel = kernel_arg
         default_k = 5 if is_colqwen25 else 3
+        if kernel != "legacy":
+            default_k = 3
         ks = self.pooling_windows if self.pooling_windows else [default_k]
         # Normalize + keep order, avoid duplicates.
         seen_ks = set()
@@ -420,10 +432,30 @@ class ProcessingPipeline:
                 target_vectors=tv,
                 mean_pool=tile_pooled,
                 window_size=int(k),
+                kernel=str(kernel),
             )
             experimental_pooled_by_name[f"experimental_pooling_{int(k)}"] = exp
             if int(k) == canonical_k:
                 experimental_pooled_by_name["experimental_pooling"] = exp
+
+        if is_colsmol and bool(getattr(self, "colsmol_experimental_2d", False)):
+            try:
+                from visual_rag.embedding.pooling import colsmol_tile_4n_pooling_from_tiles
+
+                n_rows = (token_info or {}).get("n_rows")
+                n_cols = (token_info or {}).get("n_cols")
+                if n_rows and n_cols:
+                    exp2d = colsmol_tile_4n_pooling_from_tiles(
+                        tile_pooled,
+                        n_rows=int(n_rows),
+                        n_cols=int(n_cols),
+                        has_global=True,
+                        include_self=True,
+                        output_dtype=self.embedder.output_dtype,
+                    )
+                    experimental_pooled_by_name["experimental_pooling_2d"] = exp2d
+            except Exception:
+                pass
         global_pooled = global_mean_pooling(full_embedding)
         global_pooling = self.embedder.global_pool_from_mean_pool(tile_pooled) if tile_pooled.size else global_pooled
 
@@ -515,6 +547,10 @@ class ProcessingPipeline:
             "model_name": getattr(self.embedder, "model_name", None),
             "experimental_pooling_windows": ks_norm,
             "experimental_pooling_default_window": canonical_k,
+            "experimental_pooling_kernel": str(kernel),
+            "colsmol_experimental_2d": bool(getattr(self, "colsmol_experimental_2d", False))
+            if is_colsmol
+            else None,
             "max_mean_pool_vectors": (
                 int(self.max_mean_pool_vectors) if self.max_mean_pool_vectors is not None else None
             ),

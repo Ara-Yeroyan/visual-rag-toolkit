@@ -530,22 +530,17 @@ def _index_beir_corpus(
     crop_empty_uniform_std_threshold: float,
     max_mean_pool_vectors: Optional[int],
     pooling_windows: Optional[List[int]],
+    experimental_pooling_kernel: str,
+    colsmol_experimental_2d: bool,
     no_cloudinary: bool,
     cloudinary_folder: str,
     retry_failures: bool,
     only_failures: bool,
 ) -> None:
-    qdrant_url = (
-        os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL")
-    )
+    qdrant_url = os.getenv("QDRANT_URL")
     if not qdrant_url:
         raise ValueError("QDRANT_URL not set")
-    qdrant_api_key = (
-        os.getenv("SIGIR_QDRANT_KEY")
-        or os.getenv("SIGIR_QDRANT_API_KEY")
-        or os.getenv("DEST_QDRANT_API_KEY")
-        or os.getenv("QDRANT_API_KEY")
-    )
+    qdrant_api_key = os.getenv("QDRANT_API_KEY")
 
     indexer = QdrantIndexer(
         url=qdrant_url,
@@ -558,7 +553,16 @@ def _index_beir_corpus(
 
     model_lower = (model_name or "").lower()
     is_colqwen25 = "colqwen2.5" in model_lower or "colqwen2_5" in model_lower
+    is_colsmol = "colsmol" in model_lower
+    kernel_arg = str(experimental_pooling_kernel or "auto").lower().strip()
+    if kernel_arg == "auto":
+        kernel = "gaussian" if is_colqwen25 else "legacy"
+    else:
+        kernel = kernel_arg
+
     default_k = 5 if is_colqwen25 else 3
+    if kernel != "legacy":
+        default_k = 3
     ks = pooling_windows if pooling_windows else [default_k]
     seen_ks = set()
     ks_norm: List[int] = []
@@ -576,6 +580,8 @@ def _index_beir_corpus(
     if not ks_norm:
         ks_norm = [default_k]
     experimental_vector_names = [f"experimental_pooling_{int(k)}" for k in ks_norm]
+    if is_colsmol and bool(colsmol_experimental_2d):
+        experimental_vector_names.append("experimental_pooling_2d")
 
     indexer.create_collection(
         force_recreate=recreate,
@@ -900,10 +906,30 @@ def _index_beir_corpus(
                             target_vectors=tv,
                             mean_pool=tile_pooled,
                             window_size=int(k),
+                            kernel=kernel,
                         )
                         experimental_pooled_by_name[f"experimental_pooling_{int(k)}"] = exp
                         if int(k) == int(canonical_k):
                             experimental_pooled_by_name["experimental_pooling"] = exp
+
+                    if is_colsmol and bool(colsmol_experimental_2d):
+                        try:
+                            from visual_rag.embedding.pooling import colsmol_tile_4n_pooling_from_tiles
+
+                            n_rows = (token_info or {}).get("n_rows")
+                            n_cols = (token_info or {}).get("n_cols")
+                            if n_rows and n_cols:
+                                exp2d = colsmol_tile_4n_pooling_from_tiles(
+                                    tile_pooled,
+                                    n_rows=int(n_rows),
+                                    n_cols=int(n_cols),
+                                    has_global=True,
+                                    include_self=True,
+                                    output_dtype=embedder.output_dtype,
+                                )
+                                experimental_pooled_by_name["experimental_pooling_2d"] = exp2d
+                        except Exception:
+                            pass
 
                     global_pooled = embedder.global_pool_from_mean_pool(tile_pooled)
 
@@ -1046,6 +1072,8 @@ def _index_beir_corpus(
                     "index_recovery_num_visual_tokens": int(visual_embedding.shape[0]),
                     "experimental_pooling_windows": ks_norm,
                     "experimental_pooling_default_window": int(ks_norm[0]) if ks_norm else None,
+                    "experimental_pooling_kernel": str(kernel),
+                    "colsmol_experimental_2d": bool(colsmol_experimental_2d) if is_colsmol else None,
                     "max_mean_pool_vectors": (
                         int(max_mean_pool_vectors) if max_mean_pool_vectors is not None else None
                     ),
@@ -1194,6 +1222,25 @@ def main() -> None:
             "When multiple are provided, vectors are stored as 'experimental_pooling_{k}' and "
             "the canonical 'experimental_pooling' aliases the first provided k."
         ),
+    )
+    parser.add_argument(
+        "--experimental-pooling-kernel",
+        "--experimental_pooling_kernel",
+        type=str,
+        default="auto",
+        choices=["auto", "legacy", "uniform", "triangular", "gaussian"],
+        help=(
+            "Experimental pooling kernel. "
+            "'legacy' uses the historical ColPali conv-style pooling (N->N+2r; default for ColPali). "
+            "'gaussian'/'triangular'/'uniform' use weighted same-length smoothing (N->N; default for ColQwen2.5)."
+        ),
+    )
+    parser.add_argument(
+        "--colsmol-experimental-2d",
+        "--colsmol_experimental_2d",
+        action="store_true",
+        default=False,
+        help="For ColSmol indexing, also store 2D 4-neighborhood experimental pooling as 'experimental_pooling_2d'.",
     )
     payload_group = parser.add_mutually_exclusive_group()
     payload_group.add_argument("--index-common-metadata", action="store_true", default=True)
@@ -1406,15 +1453,8 @@ def main() -> None:
     #            otherwise fall back to float16 (preserves legacy default for new collections).
     effective_qdrant_vector_dtype = str(args.qdrant_vector_dtype)
     if effective_qdrant_vector_dtype == "auto":
-        qdrant_url = (
-            os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL")
-        )
-        qdrant_api_key = (
-            os.getenv("SIGIR_QDRANT_KEY")
-            or os.getenv("SIGIR_QDRANT_API_KEY")
-            or os.getenv("DEST_QDRANT_API_KEY")
-            or os.getenv("QDRANT_API_KEY")
-        )
+        qdrant_url = os.getenv("QDRANT_URL")
+        qdrant_api_key = os.getenv("QDRANT_API_KEY")
         detected = None
         if qdrant_url:
             try:
@@ -1564,6 +1604,8 @@ def main() -> None:
                 crop_empty_uniform_std_threshold=float(args.crop_empty_uniform_std_threshold),
                 max_mean_pool_vectors=args.max_mean_pool_vectors,
                 pooling_windows=args.pooling_windows,
+                experimental_pooling_kernel=str(args.experimental_pooling_kernel),
+                colsmol_experimental_2d=bool(args.colsmol_experimental_2d),
                 no_cloudinary=bool(args.no_cloudinary),
                 cloudinary_folder=str(args.cloudinary_folder),
                 retry_failures=bool(args.retry_failures),
@@ -1626,17 +1668,8 @@ def main() -> None:
         try:
             from visual_rag.qdrant_admin import QdrantAdmin
 
-            qdrant_url = (
-                os.getenv("SIGIR_QDRANT_URL")
-                or os.getenv("DEST_QDRANT_URL")
-                or os.getenv("QDRANT_URL")
-            )
-            qdrant_api_key = (
-                os.getenv("SIGIR_QDRANT_KEY")
-                or os.getenv("SIGIR_QDRANT_API_KEY")
-                or os.getenv("DEST_QDRANT_API_KEY")
-                or os.getenv("QDRANT_API_KEY")
-            )
+            qdrant_url = os.getenv("QDRANT_URL")
+            qdrant_api_key = os.getenv("QDRANT_API_KEY")
             admin = QdrantAdmin(
                 url=qdrant_url,
                 api_key=qdrant_api_key,
@@ -1645,11 +1678,42 @@ def main() -> None:
             )
             print(f"🧠 Ensuring collection in RAM (config): {args.collection}")
             sys.stdout.flush()
-            _ = admin.ensure_collection_all_in_ram(
+            info_after = admin.ensure_collection_all_in_ram(
                 collection_name=str(args.collection),
                 timeout=int(args.qdrant_timeout),
             )
-            print("✅ ensure-in-ram config applied")
+            # Verify by printing current on_disk flags (what the UI reads)
+            try:
+                vectors = (
+                    (((info_after or {}).get("config") or {}).get("params") or {}).get("vectors") or {}
+                )
+                if isinstance(vectors, dict):
+                    vec_flags = {}
+                    for name, cfg in vectors.items():
+                        if not isinstance(cfg, dict):
+                            continue
+                        vec_flags[str(name)] = bool(cfg.get("on_disk")) if cfg.get("on_disk") is not None else None
+                else:
+                    vec_flags = {}
+                hnsw_on_disk = (
+                    (((info_after or {}).get("config") or {}).get("hnsw_config") or {}).get("on_disk")
+                )
+                on_disk_payload = (
+                    (((info_after or {}).get("config") or {}).get("params") or {}).get("on_disk_payload")
+                )
+            except Exception:
+                vec_flags = {}
+                hnsw_on_disk = None
+                on_disk_payload = None
+
+            print("✅ ensure-in-ram config applied. Verified config:")
+            if hnsw_on_disk is not None:
+                print(f"   collection.hnsw_config.on_disk={hnsw_on_disk}")
+            if on_disk_payload is not None:
+                print(f"   collection.params.on_disk_payload={on_disk_payload}")
+            if vec_flags:
+                for n in sorted(vec_flags.keys()):
+                    print(f"   vector[{n}].on_disk={vec_flags[n]}")
             sys.stdout.flush()
         except Exception as e:
             print(f"⚠️ ensure-in-ram failed: {type(e).__name__}: {e}")
@@ -1666,14 +1730,9 @@ def main() -> None:
     retriever = MultiVectorRetriever(
         collection_name=args.collection,
         embedder=embedder,
-        qdrant_url=os.getenv("SIGIR_QDRANT_URL")
-        or os.getenv("DEST_QDRANT_URL")
-        or os.getenv("QDRANT_URL"),
+        qdrant_url=os.getenv("QDRANT_URL"),
         qdrant_api_key=(
-            os.getenv("SIGIR_QDRANT_KEY")
-            or os.getenv("SIGIR_QDRANT_API_KEY")
-            or os.getenv("DEST_QDRANT_API_KEY")
-            or os.getenv("QDRANT_API_KEY")
+            os.getenv("QDRANT_API_KEY")
         ),
         prefer_grpc=args.prefer_grpc,
         request_timeout=int(args.qdrant_timeout),

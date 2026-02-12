@@ -10,17 +10,15 @@ import streamlit as st
 def get_qdrant_credentials() -> Tuple[Optional[str], Optional[str]]:
     """Get Qdrant credentials from session state or environment variables.
 
-    Priority: session_state > QDRANT_URL/QDRANT_API_KEY > legacy env vars
+    Priority: session_state > QDRANT_URL/QDRANT_API_KEY
     """
     url = (
         st.session_state.get("qdrant_url_input")
         or os.getenv("QDRANT_URL")
-        or os.getenv("SIGIR_QDRANT_URL")  # legacy
     )
     api_key = (
         st.session_state.get("qdrant_key_input")
         or os.getenv("QDRANT_API_KEY")
-        or os.getenv("SIGIR_QDRANT_KEY")  # legacy
     )
     return url, api_key
 

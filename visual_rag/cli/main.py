@@ -114,10 +114,18 @@ def cmd_process(args):
         processor_speed=str(getattr(args, "processor_speed", "fast")),
     )
 
-    # Experimental pooling windows (for additional Qdrant named vectors)
+    # Experimental pooling windows/kernel (for additional Qdrant named vectors)
     model_lower = (model_name or "").lower()
     is_colqwen25 = "colqwen2.5" in model_lower or "colqwen2_5" in model_lower
+    is_colsmol = "colsmol" in model_lower
+    kernel_arg = str(getattr(args, "experimental_pooling_kernel", "auto") or "auto").lower().strip()
+    if kernel_arg == "auto":
+        kernel = "gaussian" if is_colqwen25 else "legacy"
+    else:
+        kernel = kernel_arg
     default_k = 5 if is_colqwen25 else 3
+    if kernel != "legacy":
+        default_k = 3
     ks = args.pooling_windows if getattr(args, "pooling_windows", None) else [default_k]
     seen_ks = set()
     ks_norm = []
@@ -135,17 +143,12 @@ def cmd_process(args):
     if not ks_norm:
         ks_norm = [default_k]
     experimental_vector_names = [f"experimental_pooling_{int(k)}" for k in ks_norm]
+    if is_colsmol and bool(getattr(args, "colsmol_experimental_2d", False)):
+        experimental_vector_names.append("experimental_pooling_2d")
 
     # Initialize Qdrant indexer
-    qdrant_url = (
-        os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL")
-    )
-    qdrant_api_key = (
-        os.getenv("SIGIR_QDRANT_KEY")
-        or os.getenv("SIGIR_QDRANT_API_KEY")
-        or os.getenv("DEST_QDRANT_API_KEY")
-        or os.getenv("QDRANT_API_KEY")
-    )
+    qdrant_url = os.getenv("QDRANT_URL")
+    qdrant_api_key = os.getenv("QDRANT_API_KEY")
 
     if not qdrant_url:
         logger.error("❌ QDRANT_URL environment variable not set")
@@ -221,6 +224,8 @@ def cmd_process(args):
         crop_empty_remove_page_number=bool(getattr(args, "crop_empty_remove_page_number", False)),
         max_mean_pool_vectors=getattr(args, "max_mean_pool_vectors", 32),
         pooling_windows=getattr(args, "pooling_windows", None),
+        experimental_pooling_kernel=str(getattr(args, "experimental_pooling_kernel", "auto")),
+        colsmol_experimental_2d=bool(getattr(args, "colsmol_experimental_2d", False)),
     )
 
     # Process PDFs
@@ -269,15 +274,8 @@ def cmd_search(args):
 
     load_dotenv()
 
-    qdrant_url = (
-        os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL")
-    )
-    qdrant_api_key = (
-        os.getenv("SIGIR_QDRANT_KEY")
-        or os.getenv("SIGIR_QDRANT_API_KEY")
-        or os.getenv("DEST_QDRANT_API_KEY")
-        or os.getenv("QDRANT_API_KEY")
-    )
+    qdrant_url = os.getenv("QDRANT_URL")
+    qdrant_api_key = os.getenv("QDRANT_API_KEY")
 
     if not qdrant_url:
         logger.error("❌ QDRANT_URL not set")
@@ -400,15 +398,8 @@ def cmd_info(args):
 
     load_dotenv()
 
-    qdrant_url = (
-        os.getenv("SIGIR_QDRANT_URL") or os.getenv("DEST_QDRANT_URL") or os.getenv("QDRANT_URL")
-    )
-    qdrant_api_key = (
-        os.getenv("SIGIR_QDRANT_KEY")
-        or os.getenv("SIGIR_QDRANT_API_KEY")
-        or os.getenv("DEST_QDRANT_API_KEY")
-        or os.getenv("QDRANT_API_KEY")
-    )
+    qdrant_url = os.getenv("QDRANT_URL")
+    qdrant_api_key = os.getenv("QDRANT_API_KEY")
 
     if not qdrant_url:
         logger.error("❌ QDRANT_URL not set")
@@ -577,6 +568,25 @@ Examples:
             "or multiple ints to index/store multiple experimental vectors as "
             "'experimental_pooling_{k}' (and 'experimental_pooling' aliases the first provided k)."
         ),
+    )
+    process_parser.add_argument(
+        "--experimental-pooling-kernel",
+        "--experimental_pooling_kernel",
+        type=str,
+        default="auto",
+        choices=["auto", "legacy", "uniform", "triangular", "gaussian"],
+        help=(
+            "Experimental pooling kernel. "
+            "'legacy' uses the historical ColPali conv-style pooling (N->N+2r; default for ColPali). "
+            "'gaussian'/'triangular'/'uniform' use weighted same-length smoothing (N->N; default for ColQwen2.5)."
+        ),
+    )
+    process_parser.add_argument(
+        "--colsmol-experimental-2d",
+        "--colsmol_experimental_2d",
+        action="store_true",
+        default=False,
+        help="For ColSmol indexing, also store 2D 4-neighborhood experimental pooling as 'experimental_pooling_2d'.",
     )
     process_parser.add_argument(
         "--processor-speed",
