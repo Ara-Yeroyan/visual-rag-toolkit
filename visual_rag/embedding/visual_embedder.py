@@ -441,7 +441,8 @@ class VisualEmbedder:
             try:
                 if tok is not None:
                     lengths = [
-                        len(tok(q, add_special_tokens=True).get("input_ids", [])) for q in query_texts
+                        len(tok(q, add_special_tokens=True).get("input_ids", []))
+                        for q in query_texts
                     ]
                 else:
                     lengths = [len(str(q)) for q in query_texts]
@@ -804,7 +805,9 @@ class VisualEmbedder:
         if grid * grid == num_tokens:
             # For ColQwen2.5 with unset cap, keep all rows (grid) rather than defaulting to 32.
             effective_target_rows = (
-                int(grid) if (is_colqwen25 and target_vectors_cap is None) else int(target_vectors_cap)
+                int(grid)
+                if (is_colqwen25 and target_vectors_cap is None)
+                else int(target_vectors_cap)
             )
             if int(grid) == int(effective_target_rows):
                 return colpali_row_mean_pooling(
@@ -911,7 +914,11 @@ class VisualEmbedder:
         return weighted_row_smoothing_same_length(
             rows,
             window_size=window,
-            kernel=("gaussian" if k == "gaussian" else ("triangular" if k == "triangular" else "uniform")),
+            kernel=(
+                "gaussian"
+                if k == "gaussian"
+                else ("triangular" if k == "triangular" else "uniform")
+            ),
             output_dtype=self.output_dtype,
         )
 

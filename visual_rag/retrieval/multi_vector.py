@@ -127,6 +127,7 @@ class MultiVectorRetriever:
         self._single_stage = SingleStageRetriever(
             qdrant_client=qdrant_client,
             collection_name=collection_name,
+            experimental_vector_name=str(experimental_vector_name),
             request_timeout=request_timeout,
             max_retries=max_retries,
             retry_sleep=retry_sleep,
@@ -195,12 +196,35 @@ class MultiVectorRetriever:
                 filter_obj=filter_obj,
                 strategy="multi_vector",
             )
-        elif mode == "single_pooled":
+        elif mode in ("single_tiles", "single_pooled"):
+            # single_tiles: MaxSim on pooled vectors (multi-vector)
+            # single_pooled: backward-compatible alias (pooled query vs pooled vectors)
             return self._single_stage.search(
                 query_embedding=query_embedding,
                 top_k=top_k,
                 filter_obj=filter_obj,
-                strategy="pooled_tile",
+                strategy=("tiles_maxsim" if mode == "single_tiles" else "pooled_tile"),
+            )
+        elif mode == "single_global":
+            return self._single_stage.search(
+                query_embedding=query_embedding,
+                top_k=top_k,
+                filter_obj=filter_obj,
+                strategy="pooled_global",
+            )
+        elif mode == "single_experimental_tokens":
+            return self._single_stage.search(
+                query_embedding=query_embedding,
+                top_k=top_k,
+                filter_obj=filter_obj,
+                strategy="experimental_maxsim",
+            )
+        elif mode == "single_experimental_pooled":
+            return self._single_stage.search(
+                query_embedding=query_embedding,
+                top_k=top_k,
+                filter_obj=filter_obj,
+                strategy="pooled_experimental",
             )
         elif mode == "two_stage":
             return self._two_stage.search_server_side(

@@ -26,6 +26,8 @@ class SingleStageRetriever:
     - tiles_maxsim: Native MaxSim between query tokens and tile vectors (using="mean_pooling")
     - pooled_tile: Pooled query vs tile vectors (using="mean_pooling")
     - pooled_global: Pooled query vs global pooled doc vector (using="global_pooling")
+    - experimental_maxsim: Native MaxSim between query tokens and experimental vectors (using="experimental_pooling[_k]")
+    - pooled_experimental: Pooled query vs experimental vectors (using="experimental_pooling[_k]")
 
     Args:
         qdrant_client: Connected Qdrant client
@@ -43,12 +45,14 @@ class SingleStageRetriever:
         self,
         qdrant_client,
         collection_name: str,
+        experimental_vector_name: str = "experimental_pooling",
         request_timeout: int = 120,
         max_retries: int = 3,
         retry_sleep: float = 1.0,
     ):
         self.client = qdrant_client
         self.collection_name = collection_name
+        self.experimental_vector_name = str(experimental_vector_name)
         self.request_timeout = int(request_timeout)
         self.max_retries = max_retries
         self.retry_sleep = retry_sleep
@@ -99,6 +103,19 @@ class SingleStageRetriever:
             query_pooled = query_np.mean(axis=0)
             query_vector = query_pooled.tolist()
             logger.debug(f"🔍 Global-pooled search on '{vector_name}'")
+
+        elif strategy == "experimental_maxsim":
+            # Native multi-vector MaxSim against experimental pooled vectors
+            vector_name = self.experimental_vector_name
+            query_vector = query_np.tolist()
+            logger.debug(f"🎯 Experimental MaxSim search on '{vector_name}'")
+
+        elif strategy == "pooled_experimental":
+            # Pooled query vs experimental pooled vectors
+            vector_name = self.experimental_vector_name
+            query_pooled = query_np.mean(axis=0)
+            query_vector = query_pooled.tolist()
+            logger.debug(f"🔍 Experimental pooled search on '{vector_name}'")
 
         else:
             raise ValueError(f"Unknown strategy: {strategy}")

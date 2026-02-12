@@ -43,7 +43,7 @@ from qdrant_client.http import models as qm
 
 from visual_rag.embedding.pooling import (
     adaptive_row_mean_pooling_from_grid,
-    colpali_experimental_pooling_from_rows,
+    weighted_row_smoothing_same_length,
 )
 
 
@@ -159,8 +159,9 @@ def main() -> None:
         nargs="+",
         default=None,
         help=(
-            "Experimental pooling window size(s). If multiple are provided, vectors are updated as "
-            "'experimental_pooling_{k}' and the canonical 'experimental_pooling' aliases the first provided k."
+            "Deprecated (ColQwen now uses technique variants). Ignored. "
+            "This script always writes: experimental_pooling (Gaussian alias), "
+            "experimental_pooling_gaussian and experimental_pooling_triangular (both k=3)."
         ),
     )
     args = ap.parse_args()
@@ -180,22 +181,12 @@ def main() -> None:
         check_compatibility=False,
     )
 
-    # Requested experimental window sizes and required named vectors
-    ks = args.pooling_windows if args.pooling_windows else [5]
-    seen = set()
-    ks_norm = []
-    for k in ks:
-        try:
-            ki = int(k)
-        except Exception:
-            continue
-        if ki <= 0 or ki in seen:
-            continue
-        seen.add(ki)
-        ks_norm.append(ki)
-    if not ks_norm:
-        ks_norm = [5]
-    exp_names = ["experimental_pooling"] + [f"experimental_pooling_{k}" for k in ks_norm]
+    # Required named vectors for ColQwen experimental variants
+    exp_names = [
+        "experimental_pooling",
+        "experimental_pooling_gaussian",
+        "experimental_pooling_triangular",
+    ]
     try:
         info = client.get_collection(str(args.collection))
         vectors = info.config.params.vectors or {}
@@ -314,17 +305,12 @@ def main() -> None:
                 ),
                 output_dtype=np.float32,
             )
-            exp_by_name = {}
-            canonical_k = int(ks_norm[0])
-            for k in ks_norm:
-                exp = colpali_experimental_pooling_from_rows(
-                    mean_pool,
-                    window_size=int(k),
-                    output_dtype=np.float32,
-                )
-                exp_by_name[f"experimental_pooling_{int(k)}"] = exp
-                if int(k) == canonical_k:
-                    exp_by_name["experimental_pooling"] = exp
+            exp_gaussian = weighted_row_smoothing_same_length(
+                mean_pool, window_size=3, kernel="gaussian", output_dtype=np.float32
+            )
+            exp_triangular = weighted_row_smoothing_same_length(
+                mean_pool, window_size=3, kernel="triangular", output_dtype=np.float32
+            )
             glob = mean_pool.mean(axis=0).astype(np.float32)
 
             pv_batch.append(
@@ -333,7 +319,9 @@ def main() -> None:
                     vector={
                         "mean_pooling": mean_pool.tolist(),
                         "global_pooling": glob.tolist(),
-                        **{name: vec.tolist() for name, vec in exp_by_name.items()},
+                        "experimental_pooling": exp_gaussian.tolist(),
+                        "experimental_pooling_gaussian": exp_gaussian.tolist(),
+                        "experimental_pooling_triangular": exp_triangular.tolist(),
                     },
                 )
             )

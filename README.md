@@ -21,6 +21,8 @@ This repo contains:
 - **Modular**: PDF → images, embedding, Qdrant indexing, retrieval can be used independently.
 - **Multi-stage retrieval**: two-stage and three-stage retrieval modes built for Qdrant named vectors.
 - **Model-aware embedding**: ColSmol, ColPali, and ColQwen2/2.5 support behind a single `VisualEmbedder` interface.
+- **Configurable pooling**: adaptive mean-pooling cap for ColQwen2.5 (`--max-mean-pool-vectors`), and experimental pooling stored as Qdrant named vectors (`experimental_pooling` (ColQwen Gaussian alias), `experimental_pooling_gaussian`, `experimental_pooling_triangular`, `experimental_pooling_{k}` (ColPali), `experimental_pooling_2d` (ColSmol)).
+- **Single-stage ablations**: direct search modes over experimental pooled vectors (tokens-vs-doc and pooled-query-vs-doc) for fast storage-reduction experiments.
 - **Token hygiene**: query special-token filtering by default for more stable MaxSim behavior.
 - **Practical pipelines**: robust indexing, retries, optional Cloudinary image URLs, evaluation reporting.
 

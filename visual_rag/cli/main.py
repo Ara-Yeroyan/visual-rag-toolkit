@@ -114,35 +114,46 @@ def cmd_process(args):
         processor_speed=str(getattr(args, "processor_speed", "fast")),
     )
 
-    # Experimental pooling windows/kernel (for additional Qdrant named vectors)
+    # Experimental pooling vectors (for additional Qdrant named vectors)
     model_lower = (model_name or "").lower()
     is_colqwen25 = "colqwen2.5" in model_lower or "colqwen2_5" in model_lower
     is_colsmol = "colsmol" in model_lower
-    kernel_arg = str(getattr(args, "experimental_pooling_kernel", "auto") or "auto").lower().strip()
-    if kernel_arg == "auto":
-        kernel = "gaussian" if is_colqwen25 else "legacy"
+    experimental_vector_names = []
+    if is_colqwen25:
+        # ColQwen2.5: always store both named vectors explicitly.
+        experimental_vector_names.extend(
+            ["experimental_pooling_gaussian", "experimental_pooling_triangular"]
+        )
+        if getattr(args, "pooling_windows", None):
+            logger.warning(
+                "⚠️ --pooling-windows is ignored for ColQwen2.5 (use technique variants instead)."
+            )
+        if str(
+            getattr(args, "experimental_pooling_kernel", "auto") or "auto"
+        ).lower().strip() not in ("auto", "gaussian", "triangular"):
+            logger.warning(
+                "⚠️ --experimental-pooling-kernel is ignored for ColQwen2.5 (fixed gaussian+triangular k=3)."
+            )
     else:
-        kernel = kernel_arg
-    default_k = 5 if is_colqwen25 else 3
-    if kernel != "legacy":
+        # ColPali-style: optional multiple ks stored as experimental_pooling_{k}
         default_k = 3
-    ks = args.pooling_windows if getattr(args, "pooling_windows", None) else [default_k]
-    seen_ks = set()
-    ks_norm = []
-    for k in ks:
-        try:
-            ki = int(k)
-        except Exception:
-            continue
-        if ki <= 0:
-            continue
-        if ki in seen_ks:
-            continue
-        seen_ks.add(ki)
-        ks_norm.append(ki)
-    if not ks_norm:
-        ks_norm = [default_k]
-    experimental_vector_names = [f"experimental_pooling_{int(k)}" for k in ks_norm]
+        ks = args.pooling_windows if getattr(args, "pooling_windows", None) else [default_k]
+        seen_ks = set()
+        ks_norm = []
+        for k in ks:
+            try:
+                ki = int(k)
+            except Exception:
+                continue
+            if ki <= 0:
+                continue
+            if ki in seen_ks:
+                continue
+            seen_ks.add(ki)
+            ks_norm.append(ki)
+        if not ks_norm:
+            ks_norm = [default_k]
+        experimental_vector_names = [f"experimental_pooling_{int(k)}" for k in ks_norm]
     if is_colsmol and bool(getattr(args, "colsmol_experimental_2d", False)):
         experimental_vector_names.append("experimental_pooling_2d")
 
@@ -297,9 +308,53 @@ def cmd_search(args):
         check_compatibility=False,
     )
 
+    def _is_colqwen_model(model_name: str) -> bool:
+        return "colqwen" in str(model_name).lower()
+
     exp_vector_name = "experimental_pooling"
+    uses_experimental_vector = str(args.strategy) in (
+        "single_experimental_tokens",
+        "single_experimental_pooled",
+    ) or (
+        str(args.strategy) == "two_stage"
+        and str(args.stage1_mode)
+        in ("pooled_query_vs_experimental_pooling", "tokens_vs_experimental_pooling")
+    )
+    if (
+        getattr(args, "experimental_pooling_technique", None)
+        and getattr(args, "experimental_pooling_k", None) is not None
+    ):
+        raise SystemExit(
+            "Use only one of --experimental-pooling-technique or --experimental-pooling-k."
+        )
+
+    if getattr(args, "experimental_pooling_technique", None):
+        if not uses_experimental_vector:
+            logger.warning(
+                "--experimental-pooling-technique was provided but this strategy does not use experimental vectors; ignoring."
+            )
+        else:
+            if not _is_colqwen_model(args.model):
+                raise SystemExit(
+                    "--experimental-pooling-technique is only supported for ColQwen models."
+                )
+            exp_vector_name = (
+                f"experimental_pooling_{str(args.experimental_pooling_technique).strip().lower()}"
+            )
+
     if getattr(args, "experimental_pooling_k", None) is not None:
-        if str(args.stage1_mode) in ("pooled_query_vs_experimental_pooling", "tokens_vs_experimental_pooling"):
+        if _is_colqwen_model(args.model):
+            raise SystemExit(
+                "--experimental-pooling-k is intended for ColPali (experimental_pooling_{k}), not ColQwen."
+            )
+        if not uses_experimental_vector:
+            logger.warning(
+                "--experimental-pooling-k was provided but this strategy does not use experimental vectors; ignoring."
+            )
+        elif str(args.stage1_mode) in (
+            "pooled_query_vs_experimental_pooling",
+            "tokens_vs_experimental_pooling",
+        ) or str(args.strategy) in ("single_experimental_tokens", "single_experimental_pooled"):
             exp_vector_name = f"experimental_pooling_{int(args.experimental_pooling_k)}"
         else:
             logger.warning(
@@ -309,9 +364,14 @@ def cmd_search(args):
     two_stage = TwoStageRetriever(
         client, args.collection, experimental_vector_name=str(exp_vector_name)
     )
-    single_stage = SingleStageRetriever(client, args.collection)
+    single_stage = SingleStageRetriever(
+        client, args.collection, experimental_vector_name=str(exp_vector_name)
+    )
 
-    if str(args.stage1_mode) in ("pooled_query_vs_experimental_pooling", "tokens_vs_experimental_pooling"):
+    if str(args.stage1_mode) in (
+        "pooled_query_vs_experimental_pooling",
+        "tokens_vs_experimental_pooling",
+    ):
         try:
             info = client.get_collection(str(args.collection))
             vectors = info.config.params.vectors or {}
@@ -323,7 +383,7 @@ def cmd_search(args):
             raise SystemExit(
                 f"Requested experimental vector '{exp_vector_name}' is not present in the collection. "
                 f"Available experimental vectors: {candidates or '[]'}. "
-                "Re-index with --pooling-windows (and --force-recreate) to add it."
+                "Re-index (and --force-recreate) to add it."
             )
 
     # Embed query
@@ -360,6 +420,20 @@ def cmd_search(args):
             query_embedding=query_np,
             top_k=args.top_k,
             strategy="pooled_global",
+            filter_obj=filter_obj,
+        )
+    elif args.strategy == "single_experimental_tokens":
+        results = single_stage.search(
+            query_embedding=query_np,
+            top_k=args.top_k,
+            strategy="experimental_maxsim",
+            filter_obj=filter_obj,
+        )
+    elif args.strategy == "single_experimental_pooled":
+        results = single_stage.search(
+            query_embedding=query_np,
+            top_k=args.top_k,
+            strategy="pooled_experimental",
             filter_obj=filter_obj,
         )
     else:
@@ -564,9 +638,10 @@ Examples:
         nargs="+",
         default=None,
         help=(
-            "Experimental pooling window size(s). Provide one int to override the default window, "
+            "ColPali only: experimental pooling window size(s). Provide one int to override the default window, "
             "or multiple ints to index/store multiple experimental vectors as "
-            "'experimental_pooling_{k}' (and 'experimental_pooling' aliases the first provided k)."
+            "'experimental_pooling_{k}' (and 'experimental_pooling' aliases the first provided k). "
+            "Ignored for ColQwen2.5 (which stores gaussian+triangular variants)."
         ),
     )
     process_parser.add_argument(
@@ -578,7 +653,8 @@ Examples:
         help=(
             "Experimental pooling kernel. "
             "'legacy' uses the historical ColPali conv-style pooling (N->N+2r; default for ColPali). "
-            "'gaussian'/'triangular'/'uniform' use weighted same-length smoothing (N->N; default for ColQwen2.5)."
+            "'gaussian'/'triangular'/'uniform' use weighted same-length smoothing (N->N). "
+            "Ignored for ColQwen2.5 (which stores gaussian+triangular variants with k=3)."
         ),
     )
     process_parser.add_argument(
@@ -637,7 +713,14 @@ Examples:
         "--strategy",
         type=str,
         default="single_full",
-        choices=["single_full", "single_tiles", "single_global", "two_stage"],
+        choices=[
+            "single_full",
+            "single_tiles",
+            "single_global",
+            "single_experimental_tokens",
+            "single_experimental_pooled",
+            "two_stage",
+        ],
         help="Search strategy",
     )
     search_parser.add_argument(
@@ -667,8 +750,20 @@ Examples:
         type=int,
         default=None,
         help=(
-            "When using an experimental stage1-mode, select which indexed experimental vector to use "
+            "ColPali only: when using an experimental stage1-mode, select which indexed experimental vector to use "
             "(Qdrant named vector: 'experimental_pooling_{k}'). If omitted, uses 'experimental_pooling'."
+        ),
+    )
+    search_parser.add_argument(
+        "--experimental-pooling-technique",
+        "--experimental_pooling_technique",
+        type=str,
+        default=None,
+        choices=["gaussian", "triangular"],
+        help=(
+            "ColQwen only: choose experimental pooling named vector for experimental strategies/stage-1. "
+            "Maps to: 'experimental_pooling_gaussian' or 'experimental_pooling_triangular'. "
+            "If omitted, uses 'experimental_pooling' (Gaussian alias)."
         ),
     )
     search_parser.add_argument("--year", type=int, help="Filter by year")

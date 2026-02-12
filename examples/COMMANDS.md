@@ -11,6 +11,21 @@ export QDRANT_API_KEY="..."  # optional
 
 Or create a `.env` file in `visual-rag-toolkit/` with the same variables.
 
+## Experimental pooling knobs (index-time)
+
+When indexing, you can control:
+
+- **Adaptive mean pooling cap** (ColQwen2.5): `--max-mean-pool-vectors 32` (default), or `<=0` for **no cap**
+- **ColPali experimental pooling window(s)**: `--pooling-windows 3` or `--pooling-windows 1 3 5`
+  - Multiple windows are stored as named vectors: `experimental_pooling_{k}`
+  - The canonical `experimental_pooling` uses the **first** provided window
+- **ColQwen experimental pooling variants (always written)**:
+  - `experimental_pooling` (Gaussian alias)
+  - `experimental_pooling_gaussian`
+  - `experimental_pooling_triangular`
+- **Experimental pooling kernel** (ColPali): `--experimental-pooling-kernel auto|legacy|uniform|triangular|gaussian`
+- **ColSmol 2D experimental pooling**: `--colsmol-experimental-2d` (stores `experimental_pooling_2d`)
+
 ## Index + evaluate (single run)
 
 This is the “all-in-one” script (indexes, then evaluates once):
@@ -123,7 +138,7 @@ python -m benchmarks.vidore_beir_qdrant.run_qdrant_beir \
   --prefer-grpc \
   --torch-dtype float32 \
   --qdrant-vector-dtype float32 \
-  --batch-size 1 \
+  --batch-size 6 \
   --upload-batch-size 4 \
   --upload-workers 0 \
   --no-cloudinary \
@@ -131,7 +146,7 @@ python -m benchmarks.vidore_beir_qdrant.run_qdrant_beir \
 ```
 
 Notes:
-- **`--batch-size 1`** is the safest starting point on Apple Silicon (MPS). Increase cautiously if stable.
+- On Apple Silicon (MPS), batched queries should be stable for ColQwen2.5; if you see NaNs, reduce `--batch-size` and/or set `VISUALRAG_SORT_QUERIES_BY_LENGTH=1`.
 - This does **not** enable cropping (we do **not** pass `--crop-empty`).
 
 ## Evaluate later (optional)
@@ -172,6 +187,54 @@ python -m benchmarks.vidore_beir_qdrant.run_qdrant_beir \
   --prefetch-k 200 \
   --top-k 100 \
   --evaluation-scope per_dataset
+```
+
+Single-stage experiments on **experimental pooling** (no rerank):
+
+- **Tokens vs experimental pooled vectors** (MaxSim query tokens vs `experimental_pooling`):
+
+```bash
+python -m benchmarks.vidore_beir_qdrant.run_qdrant_beir \
+  --datasets vidore/esg_reports_v2 \
+  --collection vidore_v2__colqwen25_fp32 \
+  --model vidore/colqwen2.5-v0.2 \
+  --prefer-grpc \
+  --torch-dtype float32 \
+  --qdrant-vector-dtype float32 \
+  --mode single_experimental_tokens \
+  --top-k 100
+```
+
+- **Pooled query vs experimental pooled vectors** (pooled query vs `experimental_pooling`):
+
+```bash
+python -m benchmarks.vidore_beir_qdrant.run_qdrant_beir \
+  --datasets vidore/esg_reports_v2 \
+  --collection vidore_v2__colqwen25_fp32 \
+  --model vidore/colqwen2.5-v0.2 \
+  --prefer-grpc \
+  --torch-dtype float32 \
+  --qdrant-vector-dtype float32 \
+  --mode single_experimental_pooled \
+  --top-k 100
+```
+
+If you indexed multiple windows (ColPali; e.g. `--pooling-windows 1 3 5`), select one via:
+
+```bash
+--experimental-pooling-k 3
+```
+
+If you’re using ColQwen and want the alternate variant, select via:
+
+```bash
+--experimental-pooling-technique triangular
+```
+
+Internal helper: update existing collections’ experimental vectors (no re-embedding)
+
+```bash
+python -m scripts.qdrant_update_experimental_poolings
 ```
 
 

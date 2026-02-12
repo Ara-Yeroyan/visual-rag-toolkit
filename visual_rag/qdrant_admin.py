@@ -35,9 +35,7 @@ def _resolve_qdrant_connection(
     _maybe_load_dotenv()
     resolved_url = url or os.getenv("QDRANT_URL")
     if not resolved_url:
-        raise ValueError(
-            "Qdrant URL not set (pass url= or set QDRANT_URL)."
-        )
+        raise ValueError("Qdrant URL not set (pass url= or set QDRANT_URL).")
     resolved_key = api_key or os.getenv("QDRANT_API_KEY")
     return QdrantConnection(url=str(resolved_url), api_key=resolved_key)
 

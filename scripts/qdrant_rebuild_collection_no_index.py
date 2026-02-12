@@ -233,6 +233,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--add-colqwen-techniques",
+        dest="add_colqwen_techniques",
+        action="store_true",
+        default=False,
+        help=(
+            "Include ColQwen experimental technique named vectors in the rebuilt schema: "
+            "'experimental_pooling_gaussian' and 'experimental_pooling_triangular'."
+        ),
+    )
+    parser.add_argument(
         "--keep-temp", action="store_true", help="Do not delete temp collection at the end"
     )
     args = parser.parse_args()
@@ -250,6 +260,10 @@ def main() -> None:
         seen.add(ki)
         ks_norm.append(ki)
     experimental_vector_names = [f"experimental_pooling_{k}" for k in ks_norm]
+    if bool(getattr(args, "add_colqwen_techniques", False)):
+        experimental_vector_names.extend(
+            ["experimental_pooling_gaussian", "experimental_pooling_triangular"]
+        )
 
     if DOTENV_AVAILABLE:
         load_dotenv()

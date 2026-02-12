@@ -144,7 +144,8 @@ class QdrantIndexer:
         - initial: Full multi-vector embeddings (num_patches × dim)
         - mean_pooling: Tile-level pooled vectors (num_tiles × dim)
         - experimental_pooling: Experimental multi-vector pooling (varies by model)
-        - experimental_pooling_{k}: Optional additional experimental poolings with different window sizes
+        - experimental_pooling_{k}: (ColPali) Optional additional experimental poolings with different window sizes
+        - experimental_pooling_gaussian / experimental_pooling_triangular: (ColQwen) Technique variants (k=3)
         - global_pooling: Single vector pooled representation (dim)
 
         Args:
@@ -437,9 +438,9 @@ class QdrantIndexer:
                             self._np_vector_dtype, copy=False
                         )
                 elif exp_val is not None:
-                    exp_vectors["experimental_pooling"] = np.array(exp_val, dtype=np.float32).astype(
-                        self._np_vector_dtype, copy=False
-                    )
+                    exp_vectors["experimental_pooling"] = np.array(
+                        exp_val, dtype=np.float32
+                    ).astype(self._np_vector_dtype, copy=False)
 
                 qdrant_points.append(
                     qdrant_models.PointStruct(

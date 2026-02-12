@@ -742,8 +742,20 @@ def main() -> None:
         type=int,
         default=None,
         help=(
-            "When using an experimental stage1-mode, select which indexed experimental vector to use "
+            "ColPali only: when using an experimental stage1-mode, select which indexed experimental vector to use "
             "(Qdrant named vector: 'experimental_pooling_{k}'). If omitted, uses 'experimental_pooling'."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-pooling-technique",
+        "--experimental_pooling_technique",
+        type=str,
+        default=None,
+        choices=["gaussian", "triangular"],
+        help=(
+            "ColQwen only: choose experimental pooling named vector for experimental stage-1. "
+            "Maps to: 'experimental_pooling_gaussian' or 'experimental_pooling_triangular'. "
+            "If omitted, uses 'experimental_pooling' (Gaussian alias)."
         ),
     )
     parser.add_argument("--output", type=str, default="results/qdrant_vidore_tatdqa_test.json")
@@ -816,13 +828,37 @@ def main() -> None:
                 full_scan_threshold=args.full_scan_threshold,
             )
 
+    def _is_colqwen_model(model_name: str) -> bool:
+        return "colqwen" in str(model_name).lower()
+
     exp_vector_name = "experimental_pooling"
+    uses_experimental = str(args.stage1_mode) in (
+        "pooled_query_vs_experimental_pooling",
+        "tokens_vs_experimental_pooling",
+    ) and str(args.mode) in ("two_stage", "three_stage")
+
     if (
-        args.experimental_pooling_k is not None
-        and str(args.stage1_mode)
-        in ("pooled_query_vs_experimental_pooling", "tokens_vs_experimental_pooling")
-        and str(args.mode) in ("two_stage", "three_stage")
+        getattr(args, "experimental_pooling_technique", None)
+        and getattr(args, "experimental_pooling_k", None) is not None
     ):
+        raise ValueError(
+            "Use only one of --experimental-pooling-technique or --experimental-pooling-k."
+        )
+
+    if uses_experimental and getattr(args, "experimental_pooling_technique", None):
+        if not _is_colqwen_model(args.model):
+            raise ValueError(
+                "--experimental-pooling-technique is only supported for ColQwen models."
+            )
+        exp_vector_name = (
+            f"experimental_pooling_{str(args.experimental_pooling_technique).strip().lower()}"
+        )
+
+    if uses_experimental and getattr(args, "experimental_pooling_k", None) is not None:
+        if _is_colqwen_model(args.model):
+            raise ValueError(
+                "--experimental-pooling-k is intended for ColPali (experimental_pooling_{k}), not ColQwen."
+            )
         exp_vector_name = f"experimental_pooling_{int(args.experimental_pooling_k)}"
 
     retriever = MultiVectorRetriever(

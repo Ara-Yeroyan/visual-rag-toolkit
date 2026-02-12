@@ -132,7 +132,24 @@ def _default_output_filename(*, args, datasets: List[str]) -> str:
     parts = [model_tag, mode_tag]
     if str(args.mode) == "two_stage":
         parts.append(_safe_filename(str(args.stage1_mode)))
+        # Disambiguate which experimental named vector was used.
+        # Without this, `--experimental-pooling-k 3` overwrites the default `experimental_pooling` run.
+        if str(args.stage1_mode) in (
+            "pooled_query_vs_experimental_pooling",
+            "tokens_vs_experimental_pooling",
+            "pooled_query_vs_experimental",
+            "tokens_vs_experimental",
+        ):
+            if getattr(args, "experimental_pooling_technique", None):
+                parts.append(f"exptech{_safe_filename(str(args.experimental_pooling_technique))}")
+            if getattr(args, "experimental_pooling_k", None) is not None:
+                parts.append(f"expk{int(args.experimental_pooling_k)}")
         parts.append(f"pk{int(args.prefetch_k)}")
+    if str(args.mode) in ("single_experimental_tokens", "single_experimental_pooled"):
+        if getattr(args, "experimental_pooling_technique", None):
+            parts.append(f"exptech{_safe_filename(str(args.experimental_pooling_technique))}")
+        if getattr(args, "experimental_pooling_k", None) is not None:
+            parts.append(f"expk{int(args.experimental_pooling_k)}")
     if str(args.mode) == "three_stage":
         parts.append("tokens_vs_global")
         parts.append(f"s1k{int(args.stage1_k)}")
@@ -555,31 +572,47 @@ def _index_beir_corpus(
     is_colqwen25 = "colqwen2.5" in model_lower or "colqwen2_5" in model_lower
     is_colsmol = "colsmol" in model_lower
     kernel_arg = str(experimental_pooling_kernel or "auto").lower().strip()
-    if kernel_arg == "auto":
-        kernel = "gaussian" if is_colqwen25 else "legacy"
+    if is_colqwen25:
+        # ColQwen2.5: store technique variants (k is fixed at 3)
+        if pooling_windows:
+            raise ValueError(
+                "ColQwen2.5 does not support --pooling-windows; it stores gaussian+triangular variants."
+            )
+        if kernel_arg not in ("auto", "gaussian", "triangular"):
+            raise ValueError(
+                "ColQwen2.5 experimental pooling kernel is fixed to gaussian+triangular variants (k=3)."
+            )
+        kernel = "gaussian"
+        ks_norm = [3]
+        experimental_vector_names = [
+            "experimental_pooling_gaussian",
+            "experimental_pooling_triangular",
+        ]
     else:
-        kernel = kernel_arg
+        # ColPali-style experimental pooling supports different window sizes
+        if kernel_arg == "auto":
+            kernel = "legacy"
+        else:
+            kernel = kernel_arg
 
-    default_k = 5 if is_colqwen25 else 3
-    if kernel != "legacy":
         default_k = 3
-    ks = pooling_windows if pooling_windows else [default_k]
-    seen_ks = set()
-    ks_norm: List[int] = []
-    for k in ks:
-        try:
-            ki = int(k)
-        except Exception:
-            continue
-        if ki <= 0:
-            continue
-        if ki in seen_ks:
-            continue
-        seen_ks.add(ki)
-        ks_norm.append(ki)
-    if not ks_norm:
-        ks_norm = [default_k]
-    experimental_vector_names = [f"experimental_pooling_{int(k)}" for k in ks_norm]
+        ks = pooling_windows if pooling_windows else [default_k]
+        seen_ks = set()
+        ks_norm = []
+        for k in ks:
+            try:
+                ki = int(k)
+            except Exception:
+                continue
+            if ki <= 0:
+                continue
+            if ki in seen_ks:
+                continue
+            seen_ks.add(ki)
+            ks_norm.append(ki)
+        if not ks_norm:
+            ks_norm = [default_k]
+        experimental_vector_names = [f"experimental_pooling_{int(k)}" for k in ks_norm]
     if is_colsmol and bool(colsmol_experimental_2d):
         experimental_vector_names.append("experimental_pooling_2d")
 
@@ -898,23 +931,48 @@ def _index_beir_corpus(
                     )
 
                     experimental_pooled_by_name: Dict[str, Any] = {}
-                    canonical_k = int(ks_norm[0]) if ks_norm else int(default_k)
-                    for k in ks_norm:
-                        exp = embedder.experimental_pool_visual_embedding(
+                    if is_colqwen25:
+                        exp_gaussian = embedder.experimental_pool_visual_embedding(
                             visual_embedding,
                             token_info,
                             target_vectors=tv,
                             mean_pool=tile_pooled,
-                            window_size=int(k),
-                            kernel=kernel,
+                            window_size=3,
+                            kernel="gaussian",
                         )
-                        experimental_pooled_by_name[f"experimental_pooling_{int(k)}"] = exp
-                        if int(k) == int(canonical_k):
-                            experimental_pooled_by_name["experimental_pooling"] = exp
+                        exp_triangular = embedder.experimental_pool_visual_embedding(
+                            visual_embedding,
+                            token_info,
+                            target_vectors=tv,
+                            mean_pool=tile_pooled,
+                            window_size=3,
+                            kernel="triangular",
+                        )
+                        experimental_pooled_by_name["experimental_pooling"] = exp_gaussian
+                        experimental_pooled_by_name["experimental_pooling_gaussian"] = exp_gaussian
+                        experimental_pooled_by_name["experimental_pooling_triangular"] = (
+                            exp_triangular
+                        )
+                    else:
+                        canonical_k = int(ks_norm[0]) if ks_norm else 3
+                        for k in ks_norm:
+                            exp = embedder.experimental_pool_visual_embedding(
+                                visual_embedding,
+                                token_info,
+                                target_vectors=tv,
+                                mean_pool=tile_pooled,
+                                window_size=int(k),
+                                kernel=kernel,
+                            )
+                            experimental_pooled_by_name[f"experimental_pooling_{int(k)}"] = exp
+                            if int(k) == int(canonical_k):
+                                experimental_pooled_by_name["experimental_pooling"] = exp
 
                     if is_colsmol and bool(colsmol_experimental_2d):
                         try:
-                            from visual_rag.embedding.pooling import colsmol_tile_4n_pooling_from_tiles
+                            from visual_rag.embedding.pooling import (
+                                colsmol_tile_4n_pooling_from_tiles,
+                            )
 
                             n_rows = (token_info or {}).get("n_rows")
                             n_cols = (token_info or {}).get("n_cols")
@@ -1073,7 +1131,9 @@ def _index_beir_corpus(
                     "experimental_pooling_windows": ks_norm,
                     "experimental_pooling_default_window": int(ks_norm[0]) if ks_norm else None,
                     "experimental_pooling_kernel": str(kernel),
-                    "colsmol_experimental_2d": bool(colsmol_experimental_2d) if is_colsmol else None,
+                    "colsmol_experimental_2d": (
+                        bool(colsmol_experimental_2d) if is_colsmol else None
+                    ),
                     "max_mean_pool_vectors": (
                         int(max_mean_pool_vectors) if max_mean_pool_vectors is not None else None
                     ),
@@ -1217,7 +1277,7 @@ def main() -> None:
         nargs="+",
         default=None,
         help=(
-            "Experimental pooling window size(s). Provide one int to override the default window, "
+            "ColPali only: experimental pooling window size(s). Provide one int to override the default window, "
             "or multiple ints to index/store multiple experimental vectors. "
             "When multiple are provided, vectors are stored as 'experimental_pooling_{k}' and "
             "the canonical 'experimental_pooling' aliases the first provided k."
@@ -1232,7 +1292,8 @@ def main() -> None:
         help=(
             "Experimental pooling kernel. "
             "'legacy' uses the historical ColPali conv-style pooling (N->N+2r; default for ColPali). "
-            "'gaussian'/'triangular'/'uniform' use weighted same-length smoothing (N->N; default for ColQwen2.5)."
+            "'gaussian'/'triangular'/'uniform' use weighted same-length smoothing (N->N). "
+            "Ignored for ColQwen2.5 indexing (which stores gaussian+triangular variants with k=3)."
         ),
     )
     parser.add_argument(
@@ -1303,7 +1364,15 @@ def main() -> None:
         "--mode",
         type=str,
         default="single_full",
-        choices=["single_full", "single_tiles", "single_global", "two_stage", "three_stage"],
+        choices=[
+            "single_full",
+            "single_tiles",
+            "single_global",
+            "single_experimental_tokens",
+            "single_experimental_pooled",
+            "two_stage",
+            "three_stage",
+        ],
     )
     parser.add_argument(
         "--stage1-mode",
@@ -1335,8 +1404,20 @@ def main() -> None:
         type=int,
         default=None,
         help=(
-            "When using an experimental stage1-mode, select which indexed experimental vector to use "
+            "ColPali only: when using an experimental stage1-mode, select which indexed experimental vector to use "
             "(Qdrant named vector: 'experimental_pooling_{k}'). If omitted, uses 'experimental_pooling'."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-pooling-technique",
+        "--experimental_pooling_technique",
+        type=str,
+        default=None,
+        choices=["gaussian", "triangular"],
+        help=(
+            "ColQwen only: select which experimental pooling technique to use for stage-1/single-stage experimental "
+            "modes. Maps to Qdrant named vectors: 'experimental_pooling_gaussian' or 'experimental_pooling_triangular'. "
+            "If omitted, uses 'experimental_pooling' (Gaussian alias)."
         ),
     )
     parser.add_argument(
@@ -1366,14 +1447,14 @@ def main() -> None:
         "--continue-on-error",
         dest="continue_on_error",
         action="store_true",
-        default=True,
-        help="Continue evaluating remaining datasets if one dataset fails (default: true).",
+        default=False,
+        help="Continue evaluating remaining datasets if one dataset fails (default: false).",
     )
     cont_group.add_argument(
         "--no-continue-on-error",
         dest="continue_on_error",
         action="store_false",
-        help="Stop the run immediately on the first dataset evaluation failure.",
+        help="Stop the run immediately on the first dataset evaluation failure (default).",
     )
     parser.add_argument("--output", type=str, default="auto")
     parser.add_argument(
@@ -1684,23 +1765,25 @@ def main() -> None:
             )
             # Verify by printing current on_disk flags (what the UI reads)
             try:
-                vectors = (
-                    (((info_after or {}).get("config") or {}).get("params") or {}).get("vectors") or {}
-                )
+                vectors = (((info_after or {}).get("config") or {}).get("params") or {}).get(
+                    "vectors"
+                ) or {}
                 if isinstance(vectors, dict):
                     vec_flags = {}
                     for name, cfg in vectors.items():
                         if not isinstance(cfg, dict):
                             continue
-                        vec_flags[str(name)] = bool(cfg.get("on_disk")) if cfg.get("on_disk") is not None else None
+                        vec_flags[str(name)] = (
+                            bool(cfg.get("on_disk")) if cfg.get("on_disk") is not None else None
+                        )
                 else:
                     vec_flags = {}
                 hnsw_on_disk = (
-                    (((info_after or {}).get("config") or {}).get("hnsw_config") or {}).get("on_disk")
-                )
+                    ((info_after or {}).get("config") or {}).get("hnsw_config") or {}
+                ).get("on_disk")
                 on_disk_payload = (
-                    (((info_after or {}).get("config") or {}).get("params") or {}).get("on_disk_payload")
-                )
+                    ((info_after or {}).get("config") or {}).get("params") or {}
+                ).get("on_disk_payload")
             except Exception:
                 vec_flags = {}
                 hnsw_on_disk = None
@@ -1719,21 +1802,45 @@ def main() -> None:
             print(f"⚠️ ensure-in-ram failed: {type(e).__name__}: {e}")
             sys.stdout.flush()
 
+    def _is_colqwen_model(model_name: str) -> bool:
+        return "colqwen" in str(model_name).lower()
+
     exp_vector_name = "experimental_pooling"
-    if (
-        args.experimental_pooling_k is not None
-        and str(args.stage1_mode) in ("pooled_query_vs_experimental_pooling", "tokens_vs_experimental_pooling")
+    uses_experimental_vector = (
+        str(args.stage1_mode)
+        in ("pooled_query_vs_experimental_pooling", "tokens_vs_experimental_pooling")
         and str(args.mode) in ("two_stage", "three_stage")
+    ) or str(args.mode) in ("single_experimental_tokens", "single_experimental_pooled")
+
+    if (
+        getattr(args, "experimental_pooling_technique", None)
+        and getattr(args, "experimental_pooling_k", None) is not None
     ):
+        raise ValueError(
+            "Use only one of --experimental-pooling-technique or --experimental-pooling-k (not both)."
+        )
+
+    if uses_experimental_vector and getattr(args, "experimental_pooling_technique", None):
+        if not _is_colqwen_model(args.model):
+            raise ValueError(
+                "--experimental-pooling-technique is only supported for ColQwen models."
+            )
+        exp_vector_name = (
+            f"experimental_pooling_{str(args.experimental_pooling_technique).strip().lower()}"
+        )
+
+    if uses_experimental_vector and getattr(args, "experimental_pooling_k", None) is not None:
+        if _is_colqwen_model(args.model):
+            raise ValueError(
+                "--experimental-pooling-k is intended for ColPali (experimental_pooling_{k}), not ColQwen."
+            )
         exp_vector_name = f"experimental_pooling_{int(args.experimental_pooling_k)}"
 
     retriever = MultiVectorRetriever(
         collection_name=args.collection,
         embedder=embedder,
         qdrant_url=os.getenv("QDRANT_URL"),
-        qdrant_api_key=(
-            os.getenv("QDRANT_API_KEY")
-        ),
+        qdrant_api_key=(os.getenv("QDRANT_API_KEY")),
         prefer_grpc=args.prefer_grpc,
         request_timeout=int(args.qdrant_timeout),
         max_retries=int(args.qdrant_retries),
@@ -1741,13 +1848,18 @@ def main() -> None:
         experimental_vector_name=exp_vector_name,
     )
 
-    if (
-        str(args.stage1_mode) in ("pooled_query_vs_experimental_pooling", "tokens_vs_experimental_pooling")
+    if str(args.mode) in ("single_experimental_tokens", "single_experimental_pooled") or (
+        str(args.stage1_mode)
+        in ("pooled_query_vs_experimental_pooling", "tokens_vs_experimental_pooling")
         and str(args.mode) in ("two_stage", "three_stage")
     ):
-        existing_vectors = _collection_vector_names(client=retriever.client, collection_name=str(args.collection))
+        existing_vectors = _collection_vector_names(
+            client=retriever.client, collection_name=str(args.collection)
+        )
         if exp_vector_name not in existing_vectors:
-            candidates = sorted([v for v in existing_vectors if str(v).startswith("experimental_pooling")])
+            candidates = sorted(
+                [v for v in existing_vectors if str(v).startswith("experimental_pooling")]
+            )
             raise ValueError(
                 f"Requested experimental vector '{exp_vector_name}' is not present in the collection. "
                 f"Available experimental vectors: {candidates or '[]'}. "
@@ -1798,11 +1910,12 @@ def main() -> None:
             "qdrant_retries": int(args.qdrant_retries),
             "qdrant_retry_sleep": float(args.qdrant_retry_sleep),
             "full_scan_threshold": int(args.full_scan_threshold),
-            "max_mean_pool_vectors": int(args.max_mean_pool_vectors)
-            if args.max_mean_pool_vectors is not None
-            else None,
+            "max_mean_pool_vectors": (
+                int(args.max_mean_pool_vectors) if args.max_mean_pool_vectors is not None else None
+            ),
             "pooling_windows": args.pooling_windows,
             "experimental_pooling_k": args.experimental_pooling_k,
+            "experimental_pooling_technique": getattr(args, "experimental_pooling_technique", None),
             "eval_wall_time_s": float(max(time.time() - eval_started_at, 0.0)),
             "metrics": single_metrics,
             "metrics_by_dataset": metrics_by_dataset,
@@ -1918,6 +2031,18 @@ def main() -> None:
             sys.stdout.flush()
         except Exception as e:
             dataset_errors[ds_name] = f"{type(e).__name__}: {e}"
+            print(f"❌ Evaluation failed for dataset={ds_name}: {dataset_errors[ds_name]}")
+            # Common cause for per_dataset: missing payload index for 'dataset'
+            msg = str(e)
+            if (
+                'Index required but not found for "dataset"' in msg
+                or "Index required but not found for 'dataset'" in msg
+            ):
+                print(
+                    "   Hint: Qdrant requires a payload index for key 'dataset' to use per-dataset filtering.\n"
+                    "   Fix: create payload index (keyword) on the collection, or rerun indexing with metadata indexes enabled."
+                )
+            sys.stdout.flush()
             if not bool(args.continue_on_error):
                 _write_json_atomic(out_path, _build_run_record())
                 raise
