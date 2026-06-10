@@ -48,7 +48,8 @@ def render_playground_tab():
             with st.spinner(f"Loading {model_short}..."):
                 try:
                     _ = MultiVectorRetriever(
-                        collection_name=active_collection, model_name=model_name
+                        collection_name=active_collection, model_name=model_name,
+                        qdrant_url=url, qdrant_api_key=api_key,
                     )
                     st.session_state["model_loaded"] = True
                     st.session_state["loaded_model_key"] = cache_key

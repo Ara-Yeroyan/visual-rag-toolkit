@@ -184,7 +184,7 @@ def search_collection(
     top_k: int = 10,
     mode: str = "single_full",
     prefetch_k: int = 256,
-    stage1_mode: str = "tokens_vs_standard_pooling",
+    stage1_mode: str = "pooled_query_vs_standard_pooling",
     stage1_k: int = 1000,
     stage2_k: int = 300,
     model_name: str = "vidore/colSmol-500M",
@@ -194,9 +194,12 @@ def search_collection(
 
         from visual_rag.retrieval import MultiVectorRetriever
 
+        url, api_key = get_qdrant_credentials()
         retriever = MultiVectorRetriever(
             collection_name=collection_name,
             model_name=model_name,
+            qdrant_url=url,
+            qdrant_api_key=api_key,
         )
         if mode == "three_stage":
             q_emb = retriever.embedder.embed_query(query)

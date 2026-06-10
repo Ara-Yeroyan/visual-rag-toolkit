@@ -22,4 +22,12 @@ pdf2image>=1.16.0
 pypdf>=3.0.0
 
 # ColPali dependencies (torch/transformers come from base image)
+colpali-engine>=0.3.0
+einops>=0.8.0
 peft>=0.13.0
+
+# Mistral tokenizer (required by transformers>=4.51)
+mistral-common>=1.5.0
+
+# Image CDN
+cloudinary>=1.30.0
