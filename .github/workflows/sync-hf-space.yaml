@@ -1,20 +1,57 @@
 name: Sync to HuggingFace Space
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "visual_rag/**"
+      - "demo/**"
+      - "benchmarks/**"
+      - "requirements.txt"
+      - "pyproject.toml"
+      - "Dockerfile"
+      - ".github/workflows/sync-hf-space.yaml"
   workflow_dispatch: {}
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout GitHub repo
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          lfs: true
+          path: source
 
-      - name: Push to HuggingFace Space
+      - name: Checkout HF Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git remote add hf https://Yeroyan:${HF_TOKEN}@huggingface.co/spaces/Yeroyan/visual-rag-toolkit || true
-          git push hf main --force
+          git clone https://Yeroyan:${HF_TOKEN}@huggingface.co/spaces/Yeroyan/visual-rag-toolkit hf-space
+
+      - name: Sync files to HF Space
+        run: |
+          cd hf-space
+
+          rm -rf visual_rag/ demo/ benchmarks/
+
+          cp -r ../source/visual_rag/ ./visual_rag/
+          cp -r ../source/demo/ ./demo/
+          cp -r ../source/benchmarks/ ./benchmarks/
+          cp ../source/requirements.txt ./requirements.txt
+          cp ../source/pyproject.toml ./pyproject.toml
+
+          if [ -f ../source/Dockerfile ]; then
+            cp ../source/Dockerfile ./Dockerfile
+          fi
+
+      - name: Push to HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          cd hf-space
+          git config user.name "Ara Yeroyan"
+          git config user.email "ar23yeroyan@gmail.com"
+          git add -A
+          git diff --staged --quiet && echo "No changes to push" && exit 0
+          git commit -m "sync from GitHub: $(cd ../source && git log -1 --format='%s')"
+          git push
