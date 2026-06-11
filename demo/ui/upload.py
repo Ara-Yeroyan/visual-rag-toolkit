@@ -350,7 +350,7 @@ def process_pdfs(uploaded_files, config):
             if use_cloudinary:
                 cloud_status.info("Connecting to Cloudinary...")
                 try:
-                    cloudinary_uploader = CloudinaryUploader()
+                    cloudinary_uploader = CloudinaryUploader(folder=f"visual-rag/{collection_name}")
                     cloud_status.success("✅ Cloudinary ready")
                 except Exception as e:
                     cloud_status.warning(f"⚠️ Cloudinary unavailable: {str(e)[:30]}")
