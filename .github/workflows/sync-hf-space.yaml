@@ -10,7 +10,7 @@ on:
       - "requirements.txt"
       - "pyproject.toml"
       - "Dockerfile"
-      - ".github/workflows/sync-hf-space.yaml"
+      - "LICENSE"
   workflow_dispatch: {}
 
 jobs:
@@ -40,9 +40,8 @@ jobs:
           cp ../source/requirements.txt ./requirements.txt
           cp ../source/pyproject.toml ./pyproject.toml
 
-          if [ -f ../source/Dockerfile ]; then
-            cp ../source/Dockerfile ./Dockerfile
-          fi
+          cp ../source/Dockerfile ./Dockerfile 2>/dev/null || true
+          cp ../source/LICENSE ./LICENSE 2>/dev/null || true
 
       - name: Push to HF Space
         env:

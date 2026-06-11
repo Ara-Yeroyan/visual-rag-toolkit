@@ -25,7 +25,7 @@ RUN mkdir -p /app/.streamlit /app/.cache/streamlit /app/.cache/huggingface /app/
 COPY visual_rag/ ./visual_rag/
 COPY benchmarks/ ./benchmarks/
 COPY demo/ ./demo/
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md LICENSE ./
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install -e .
 
