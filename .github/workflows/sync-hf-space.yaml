@@ -33,13 +33,13 @@ jobs:
           cd hf-space
 
           rm -rf visual_rag/ demo/ benchmarks/
+          rm -rf examples/ scripts/ tests/ .github/ demo_app.py .gitignore
 
           cp -r ../source/visual_rag/ ./visual_rag/
           cp -r ../source/demo/ ./demo/
           cp -r ../source/benchmarks/ ./benchmarks/
           cp ../source/requirements.txt ./requirements.txt
           cp ../source/pyproject.toml ./pyproject.toml
-
           cp ../source/Dockerfile ./Dockerfile 2>/dev/null || true
           cp ../source/LICENSE ./LICENSE 2>/dev/null || true
 
