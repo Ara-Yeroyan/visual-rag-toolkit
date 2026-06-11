@@ -26,8 +26,8 @@ colpali-engine>=0.3.0
 einops>=0.8.0
 peft>=0.13.0
 
-# Mistral tokenizer (required by transformers>=4.51)
-mistral-common>=1.5.0
+# Mistral tokenizer (ReasoningEffort required by transformers>=5.3)
+mistral-common>=1.10.0
 
 # Image CDN
 cloudinary>=1.30.0
