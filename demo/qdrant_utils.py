@@ -1,10 +1,12 @@
 """Qdrant connection and utility functions."""
 
 import os
+import time
 import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
+from visual_rag.retrieval import MultiVectorRetriever
 
 
 def get_qdrant_credentials() -> Tuple[Optional[str], Optional[str]]:
@@ -190,21 +192,33 @@ def search_collection(
     model_name: str = "vidore/colSmol-500M",
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     try:
-        import traceback
-
-        from visual_rag.retrieval import MultiVectorRetriever
-
         url, api_key = get_qdrant_credentials()
+
+        print(f"[SEARCH] ---- query: {query[:80]!r} ----")
+        print(f"[SEARCH] collection={collection_name}, model={model_name}")
+        print(f"[SEARCH] mode={mode}, top_k={top_k}")
+        if mode == "two_stage":
+            print(f"[SEARCH]   stage1_mode={stage1_mode}, prefetch_k={prefetch_k}")
+        elif mode == "three_stage":
+            print(f"[SEARCH]   stage1_k={stage1_k}, stage2_k={stage2_k}")
+
+        t_start = time.perf_counter()
+
         retriever = MultiVectorRetriever(
             collection_name=collection_name,
             model_name=model_name,
             qdrant_url=url,
             qdrant_api_key=api_key,
         )
+        t_retriever = time.perf_counter()
+        print(f"[SEARCH] retriever ready in {t_retriever - t_start:.2f}s")
+
         if mode == "three_stage":
             q_emb = retriever.embedder.embed_query(query)
             if hasattr(q_emb, "cpu"):
                 q_emb = q_emb.cpu().numpy()
+            t_embed = time.perf_counter()
+            print(f"[SEARCH] query embedded in {t_embed - t_retriever:.2f}s (shape={q_emb.shape})")
             results = retriever.search_embedded(
                 query_embedding=q_emb,
                 top_k=top_k,
@@ -220,8 +234,13 @@ def search_collection(
                 prefetch_k=prefetch_k,
                 stage1_mode=stage1_mode,
             )
+
+        t_done = time.perf_counter()
+        print(f"[SEARCH] search done in {t_done - t_retriever:.2f}s, total={t_done - t_start:.2f}s")
+        print(f"[SEARCH] returned {len(results)} results")
+        if results:
+            scores = [r.get("score_final", r.get("score_stage1", 0)) for r in results[:3]]
+            print(f"[SEARCH] top-3 scores: {[f'{s:.4f}' for s in scores]}")
         return results, None
     except Exception as e:
-        import traceback
-
         return [], f"{e}\n\n{traceback.format_exc()}"
