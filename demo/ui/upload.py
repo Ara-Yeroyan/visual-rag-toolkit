@@ -314,7 +314,16 @@ def process_pdfs(uploaded_files, config):
                 coll_status.info(f"Creating collection `{collection_name}`...")
                 for attempt in range(3):
                     try:
-                        indexer.create_collection(force_recreate=False)
+                        model_lower = (model_name or "").lower()
+                        is_colqwen25 = "colqwen2.5" in model_lower or "colqwen2_5" in model_lower
+                        if is_colqwen25:
+                            exp_names = ["experimental_pooling_gaussian", "experimental_pooling_triangular"]
+                        else:
+                            exp_names = ["experimental_pooling_3"]
+                        indexer.create_collection(
+                            force_recreate=False,
+                            experimental_vector_names=exp_names,
+                        )
                         break
                     except Exception:
                         if attempt < 2:
