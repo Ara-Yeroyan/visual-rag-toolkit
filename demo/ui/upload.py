@@ -269,15 +269,12 @@ def process_pdfs(uploaded_files, config):
             model_status.info(f"Loading `{model_short}`...")
 
             output_dtype = np.float16 if vector_dtype == "float16" else np.float32
-            embedder_key = f"{model_name}::{vector_dtype}"
-            embedder = None
-            if st.session_state.get("upload_embedder_key") == embedder_key:
-                embedder = st.session_state.get("upload_embedder")
-            if embedder is None:
-                embedder = VisualEmbedder(model_name=model_name, output_dtype=output_dtype)
-                embedder._load_model()
-                st.session_state["upload_embedder_key"] = embedder_key
-                st.session_state["upload_embedder"] = embedder
+            from demo.qdrant_utils import init_embedder
+            embedder, err = init_embedder(model_name)
+            if err:
+                model_status.error(f"❌ Failed to load model: {err[:100]}")
+                return
+            embedder.output_dtype = output_dtype
             model_status.success(f"✅ Model `{model_short}` loaded ({vector_dtype})")
 
         with phase2:

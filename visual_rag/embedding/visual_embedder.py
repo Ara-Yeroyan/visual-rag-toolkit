@@ -618,13 +618,55 @@ class VisualEmbedder:
 
         for i in iterator:
             batch = images[i : i + batch_size]
+            current_batch_size = len(batch)
 
-            with torch.no_grad():
-                processed = self.processor.process_images(batch).to(self.model.device)
+            while current_batch_size > 0:
+                try:
+                    sub_batch = batch[:current_batch_size]
+                    self._embed_image_batch(
+                        sub_batch, embeddings, token_infos, return_token_info
+                    )
+                    if current_batch_size < len(batch):
+                        remaining = batch[current_batch_size:]
+                        for single in remaining:
+                            self._embed_image_batch(
+                                [single], embeddings, token_infos, return_token_info
+                            )
+                    break
+                except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                    if "out of memory" not in str(e).lower() and "CUDA" not in str(e):
+                        raise
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    new_size = max(1, current_batch_size // 2)
+                    logger.warning(
+                        f"⚠️ CUDA OOM with batch_size={current_batch_size}, "
+                        f"retrying with batch_size={new_size}"
+                    )
+                    print(
+                        f"[OOM] Reducing batch size from {current_batch_size} to {new_size}"
+                    )
+                    if new_size == current_batch_size:
+                        raise
+                    current_batch_size = new_size
 
-                # Extract token info before model forward
-                if return_token_info:
-                    input_ids = processed["input_ids"]
+        if return_token_info:
+            return embeddings, token_infos
+        return embeddings
+
+    def _embed_image_batch(
+        self,
+        batch: List[Image.Image],
+        embeddings: list,
+        token_infos: Optional[list],
+        return_token_info: bool,
+    ):
+        with torch.no_grad():
+            processed = self.processor.process_images(batch).to(self.model.device)
+
+            if return_token_info:
+                input_ids = processed["input_ids"]
                     batch_n_rows = processed.get("n_rows")
                     batch_n_cols = processed.get("n_cols")
                     # Qwen2/2.5-VL style grid information (T, H, W)
@@ -681,27 +723,20 @@ class VisualEmbedder:
                             }
                         )
 
-                # Generate embeddings
-                batch_embeddings = self.model(**processed)
+            batch_embeddings = self.model(**processed)
 
-            # Extract per-image embeddings
-            if isinstance(batch_embeddings, torch.Tensor) and batch_embeddings.dim() == 3:
-                for j in range(batch_embeddings.shape[0]):
-                    embeddings.append(batch_embeddings[j].cpu())
-            else:
-                embeddings.extend([e.cpu() for e in batch_embeddings])
+        if isinstance(batch_embeddings, torch.Tensor) and batch_embeddings.dim() == 3:
+            for j in range(batch_embeddings.shape[0]):
+                embeddings.append(batch_embeddings[j].cpu())
+        else:
+            embeddings.extend([e.cpu() for e in batch_embeddings])
 
-            # Memory cleanup
-            del processed, batch_embeddings
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            elif torch.backends.mps.is_available():
-                torch.mps.empty_cache()
-
-        if return_token_info:
-            return embeddings, token_infos
-        return embeddings
+        del processed, batch_embeddings
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            torch.mps.empty_cache()
 
     def extract_visual_embedding(
         self,

@@ -43,7 +43,9 @@ def init_embedder(model_name: str):
     try:
         from visual_rag import VisualEmbedder
 
-        return VisualEmbedder(model_name=model_name), None
+        embedder = VisualEmbedder(model_name=model_name)
+        embedder._load_model()
+        return embedder, None
     except Exception as e:
         return None, f"{e}\n\n{traceback.format_exc()}"
 

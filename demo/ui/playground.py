@@ -47,13 +47,14 @@ def render_playground_tab():
         if not st.session_state.get("model_loaded"):
             with st.spinner(f"Loading {model_short}..."):
                 try:
-                    _ = MultiVectorRetriever(
-                        collection_name=active_collection, model_name=model_name,
-                        qdrant_url=url, qdrant_api_key=api_key,
-                    )
-                    st.session_state["model_loaded"] = True
-                    st.session_state["loaded_model_key"] = cache_key
-                    st.session_state["loaded_model_name"] = model_name
+                    from demo.qdrant_utils import init_embedder
+                    embedder, err = init_embedder(model_name)
+                    if err:
+                        st.warning(f"Failed: {model_short}")
+                    else:
+                        st.session_state["model_loaded"] = True
+                        st.session_state["loaded_model_key"] = cache_key
+                        st.session_state["loaded_model_name"] = model_name
                 except Exception:
                     st.warning(f"Failed: {model_short}")
 
