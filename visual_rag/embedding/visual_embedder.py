@@ -667,61 +667,51 @@ class VisualEmbedder:
 
             if return_token_info:
                 input_ids = processed["input_ids"]
-                    batch_n_rows = processed.get("n_rows")
-                    batch_n_cols = processed.get("n_cols")
-                    # Qwen2/2.5-VL style grid information (T, H, W)
-                    batch_grid_thw = processed.get("image_grid_thw", None)
-                    if batch_grid_thw is None:
-                        batch_grid_thw = processed.get("grid_thw", None)
-                    if batch_grid_thw is None:
-                        batch_grid_thw = processed.get("image_grid", None)
+                batch_n_rows = processed.get("n_rows")
+                batch_n_cols = processed.get("n_cols")
+                batch_grid_thw = processed.get("image_grid_thw", None)
+                if batch_grid_thw is None:
+                    batch_grid_thw = processed.get("grid_thw", None)
+                if batch_grid_thw is None:
+                    batch_grid_thw = processed.get("image_grid", None)
 
-                    for j in range(input_ids.shape[0]):
-                        # Find visual token indices
-                        image_token_mask = input_ids[j] == self.image_token_id
-                        visual_indices = torch.where(image_token_mask)[0].cpu().numpy().tolist()
+                for j in range(input_ids.shape[0]):
+                    image_token_mask = input_ids[j] == self.image_token_id
+                    visual_indices = torch.where(image_token_mask)[0].cpu().numpy().tolist()
 
-                        n_rows = batch_n_rows[j].item() if batch_n_rows is not None else None
-                        n_cols = batch_n_cols[j].item() if batch_n_cols is not None else None
-                        grid_t = grid_h = grid_w = None
-                        grid_h_eff = grid_w_eff = None
-                        if batch_grid_thw is not None:
-                            try:
-                                g = batch_grid_thw[j]
-                                # sometimes [B, N, 3] -> take first image
-                                if hasattr(g, "dim") and g.dim() == 2:
-                                    g = g[0]
-                                t, h, w = [int(x) for x in g.detach().cpu().tolist()]
-                                grid_t, grid_h, grid_w = t, h, w
-                                # ColQwen2.5/Qwen2.5-VL uses a 2×2 spatial merge internally, but different
-                                # processor versions expose different grids:
-                                # - Some expose the *post-merge* token grid (H×W == num_visual_tokens)
-                                # - Others expose the *pre-merge* pixel/patch grid ((H/2)×(W/2) == num_visual_tokens)
-                                # We infer the effective grid by matching the observed token count.
-                                num_visual = int(len(visual_indices))
-                                if int(h) * int(w) == num_visual:
-                                    grid_h_eff, grid_w_eff = int(h), int(w)
-                                elif (
-                                    h % 2 == 0 and w % 2 == 0 and (h // 2) * (w // 2) == num_visual
-                                ):
-                                    grid_h_eff, grid_w_eff = int(h // 2), int(w // 2)
-                            except Exception:
-                                pass
+                    n_rows = batch_n_rows[j].item() if batch_n_rows is not None else None
+                    n_cols = batch_n_cols[j].item() if batch_n_cols is not None else None
+                    grid_t = grid_h = grid_w = None
+                    grid_h_eff = grid_w_eff = None
+                    if batch_grid_thw is not None:
+                        try:
+                            g = batch_grid_thw[j]
+                            if hasattr(g, "dim") and g.dim() == 2:
+                                g = g[0]
+                            t, h, w = [int(x) for x in g.detach().cpu().tolist()]
+                            grid_t, grid_h, grid_w = t, h, w
+                            num_visual = int(len(visual_indices))
+                            if int(h) * int(w) == num_visual:
+                                grid_h_eff, grid_w_eff = int(h), int(w)
+                            elif (
+                                h % 2 == 0 and w % 2 == 0 and (h // 2) * (w // 2) == num_visual
+                            ):
+                                grid_h_eff, grid_w_eff = int(h // 2), int(w // 2)
+                        except Exception:
+                            pass
 
-                        token_infos.append(
-                            {
-                                "visual_token_indices": visual_indices,
-                                "num_visual_tokens": len(visual_indices),
-                                "n_rows": n_rows,
-                                "n_cols": n_cols,
-                                "num_tiles": (n_rows * n_cols + 1) if n_rows and n_cols else None,
-                                "grid_t": grid_t,
-                                "grid_h": grid_h,
-                                "grid_w": grid_w,
-                                "grid_h_eff": grid_h_eff,
-                                "grid_w_eff": grid_w_eff,
-                            }
-                        )
+                    token_infos.append({
+                        "visual_token_indices": visual_indices,
+                        "num_visual_tokens": len(visual_indices),
+                        "n_rows": n_rows,
+                        "n_cols": n_cols,
+                        "num_tiles": (n_rows * n_cols + 1) if n_rows and n_cols else None,
+                        "grid_t": grid_t,
+                        "grid_h": grid_h,
+                        "grid_w": grid_w,
+                        "grid_h_eff": grid_h_eff,
+                        "grid_w_eff": grid_w_eff,
+                    })
 
             batch_embeddings = self.model(**processed)
 
