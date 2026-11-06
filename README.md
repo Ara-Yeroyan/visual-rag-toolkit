@@ -288,12 +288,28 @@ pytest tests/ -v
 
 ## 📄 Citation
 
-If you use this toolkit in your research, please cite:
+If you use this toolkit or its retrieval methods in your research, please cite the SIGIR 2026 paper:
 
 ```bibtex
-@software{visual_rag_toolkit,
-  title = {Visual RAG Toolkit: Scalable Visual Document Retrieval with 1D Convolutional Pooling},
-  author = {Ara Yeroyan},
+@inproceedings{yeroyan2026visualrag,
+  author = {Yeroyan, Ara},
+  title = {Visual {RAG} at Scale: Tile-Level Spatial Pooling for Efficient Multi-Vector Document Retrieval},
+  booktitle = {Proceedings of the 49th International ACM SIGIR Conference on Research and Development in Information Retrieval},
+  series = {SIGIR '26},
+  year = {2026},
+  pages = {5245--5249},
+  publisher = {Association for Computing Machinery},
+  doi = {10.1145/3805712.3808383},
+  url = {https://doi.org/10.1145/3805712.3808383}
+}
+```
+
+To additionally acknowledge the software implementation, you may cite:
+
+```bibtex
+@software{yeroyan2026visualragtoolkit,
+  author = {Yeroyan, Ara},
+  title = {Visual RAG Toolkit},
   year = {2026},
   url = {https://github.com/Ara-Yeroyan/visual-rag-toolkit}
 }
